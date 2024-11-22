@@ -58,7 +58,7 @@ You can also embed plots, for example:
 
 ```{r pressure, echo=FALSE}
 
-load('NHANES15-16/df.master-2024.08.18.Rda')
+load('df.master-2024.08.18.Rda')
 ```
 
 
@@ -440,7 +440,7 @@ xgb_tuned.full.29 <- caret::train(
 ## creates xgb_tuned.25
 save(xgb_tuned.full.29,file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
 #load(file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
-xgb_tuned <- xgb_tuned.25
+#xgb_tuned <- xgb_tuned.25
 ```
 
 
@@ -451,9 +451,9 @@ xgb_tuned <- xgb_tuned.25
 
 
 ```{r}
-
+#xgb.model.full <- xgb_tuned.full.29
 office_train.makeX <- makeX(office_train)
-office_train.makeX <- office_train.makeX[,order(colnames(office_train.makeX))]
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
 
 
 office_test.makeX <- makeX(office_test)
@@ -462,7 +462,7 @@ office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
 office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
 office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
 
-office_test.makeX<-office_test.makeX[,order(colnames(office_test.makeX))]
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
 
 
 
@@ -472,7 +472,9 @@ dtest <- xgb.DMatrix(data = office_test.makeX, label = label.test)
 xgb.model.full<- xgboost::xgb.train(params=xgb_tuned.full.29$bestTune %>% flatten(),dtrain,nrounds=2000)
 
 sum(colnames(dtrain) %in% colnames(dtest))
+sum(colnames(dtrain)==colnames(dtest))
 colnames(dtrain)[!colnames(dtrain) %in% colnames(dtest)]
+colnames(dtest)[!colnames(dtrain) %in% colnames(dtest)]
 colnames(dtest)[!colnames(dtest) %in% colnames(dtrain)]
 colnames(dtest)[!colnames(dtest) %in% xgb.model.full$feature_names]
 
@@ -513,6 +515,8 @@ Var.Other.3 <- c("ggt","phos","u.alb", "u.cr","choles","HepB.sAb","HepB.cAb")
 
 
 ```{r}
+library(Gmisc)
+
 df.small %>% mutate(Year.2015 = Year > 2013) %>% 
   getDescriptionStatsBy(by=Year.2015,show_all_values=TRUE,
 #`Fasting Glucose Plasma&dagger;`=fpg,				
@@ -652,42 +656,42 @@ xgb_tuned.Fasting <- caret::train(
 xgb.model.Fasting<- xgboost::xgb.train(params=xgb_tuned.Fasting$bestTune %>% flatten(),dtrain,nrounds=2000)
 office_test$Pred.Fasting <- predict(xgb.model.Fasting,dtest)
 
-# 
-# ### URINE
-# office_train.Urine <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
-# 
-# office_train.makeX <- makeX(office_train.Fasting)
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# 
-# office_test.Urine <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
-# 
-# 
-# office_test.makeX <-  makeX(office_test.Urine)
-# office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
-# office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
-# office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# 
-# xgb_tuned.Urine <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.Urine.Var<- xgboost::xgb.train(params=xgb_tuned.Urine$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Urine.Var <- predict(xgb.model.Urine.Var,dtest)
+
+### URINE
+office_train.Urine <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+
+office_train.makeX <- makeX(office_train.Fasting)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+
+office_test.Urine <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+
+
+office_test.makeX <-  makeX(office_test.Urine)
+office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+xgb_tuned.Urine <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.Urine.Var<- xgboost::xgb.train(params=xgb_tuned.Urine$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Urine.Var <- predict(xgb.model.Urine.Var,dtest)
 
 
 
@@ -728,45 +732,86 @@ office_test$Pred.SDOH <- predict(xgb.model.SDOH,dtest)
 
 
 
-# 
-# ### VAR 2 --- this is now a mini version of Full based on the results from Full
-# 
-# office_train.Var2 <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
-# 
-# office_train.makeX <- makeX(office_train.Var2)
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# office_test.Var2 <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
-# 
-# office_test.makeX <-  makeX(office_test.Var2)
-# office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
-# office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
-# office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# xgb_tuned.Var2 <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.Var2<- xgboost::xgb.train(params=xgb_tuned.Var2$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Var2 <- predict(xgb.model.Var2,dtest)
+
+### VAR 2 --- this is now a mini version of Full based on the results from Full
+
+office_train.Var2 <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+
+office_train.makeX <- makeX(office_train.Var2)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+office_test.Var2 <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+
+office_test.makeX <-  makeX(office_test.Var2)
+office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+xgb_tuned.Var2 <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.Var2<- xgboost::xgb.train(params=xgb_tuned.Var2$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Var2 <- predict(xgb.model.Var2,dtest)
+
+
+
+### FIB-4
+office_train.FIB4 <- office_train %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+
+office_train.makeX <- makeX(office_train.FIB4)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+
+office_test.FIB4 <- office_test %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+
+
+office_test.makeX <-  makeX(office_test.FIB4)
+office_test.makeX <- cbind(office_test.makeX,`Marriage.StatusDon't know`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelHigh School Grad/GED or equivalent`=0)
+office_test.makeX <- cbind(office_test.makeX,`EduLevelRefused`=0)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+
+xgb_tuned.FIB4 <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.FIB4<- xgboost::xgb.train(params=xgb_tuned.FIB4$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
 
 
 office_test$two <- label.test
-
-save(office_test,file='~/Documents/NHANES15-16/NHANES-office-test-layered_2024.10.30.Rda')
+office_test$sample.ogtt.weight <-  weight.sample.test
+save(office_test,file='~/Documents/NHANES15-16/NHANES-office-test-layered_2024.11.05.Rda')
 
 
 #office_test$Pred.26 <- predict(xgb.model.26,dtest)
@@ -874,7 +919,7 @@ Var.Other.3.2 = c("u.alb", "u.cr","choles","ggt","phos",
 ### + Var.Other.2
 
 var.vector <- c(rep("Clinic",length(Var.Clinic.2)),
-                rep("History",length(Var.Hx.2)-2), ### excluding Ever.Told.OverweightRefused,dm.told.ever$Refused
+                rep("History",length(Var.Hx.2)-3), ### excluding Ever.Told.OverweightRefused,dm.told.ever$Refused
                 rep("CBC",length(Var.CBC.2)),
                 rep("CMP",length(Var.CMP.2)),
                 rep("SDOH History",length(Var.SDOH.2)),
@@ -1082,18 +1127,17 @@ grid.arrange(ncol=2,plot.roc.eval.pdm,plot.roc.eval.dm)
 
 
 
-
-```{r DCA Plots - Evaluation,  echo=FALSE, include=TRUE}
+```{r DCA Plots - Evaluation ,  echo=FALSE, include=TRUE}
 library(dcurves)
 office_test$sample.ogtt.weight <- weight.sample.test
 
-x0 <- office_test$two
-x1 <- office_test$Pred.Base
-x2 <- office_test$Pred.SDOH
-x3 <- office_test$Pred.Fasting
-x4 <- office_test$Pred.Urine.Var
-x5 <- office_test$Pred.Var2
-x6 <- office_test$Pred.Full
+# x0 <- office_test$two
+# x1 <- office_test$Pred.Base
+# x2 <- office_test$Pred.SDOH
+# x3 <- office_test$Pred.Fasting
+# x4 <- office_test$Pred.Urine.Var
+# x5 <- office_test$Pred.Var2
+# x6 <- office_test$Pred.Full
   
 x0.a1c <- office_test$a1c
 x0.igt <- as.factor(office_test$two>=140 & office_test$two<200)
@@ -1114,6 +1158,7 @@ bm.pdm.x3 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Fasting)#, weight
 bm.pdm.x4 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Urine.Var)#, weights = sample.ogtt.weight)
 bm.pdm.x5 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Var2)#, weights = sample.ogtt.weight)
 bm.pdm.x6 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Full)#, weights = sample.ogtt.weight)
+bm.pdm.x7 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.FIB4)#, weights = sample.ogtt.weight)
 
 
 ## pm = pred.model
@@ -1124,10 +1169,11 @@ df.dca.eval <- df.dca.eval %>%
   mutate(pm.pdm.x3 = broom::augment(bm.pdm.x3, type.predict="response") %>% pull(".fitted")) %>% 
   mutate(pm.pdm.x4 = broom::augment(bm.pdm.x4, type.predict="response") %>% pull(".fitted")) %>% 
   mutate(pm.pdm.x5 = broom::augment(bm.pdm.x5, type.predict="response") %>% pull(".fitted")) %>% 
-  mutate(pm.pdm.x6 = broom::augment(bm.pdm.x6, type.predict="response") %>% pull(".fitted"))  
+  mutate(pm.pdm.x6 = broom::augment(bm.pdm.x6, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x7 = broom::augment(bm.pdm.x7, type.predict="response") %>% pull(".fitted"))   
   
 
-plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 + pm.pdm.x4 + pm.pdm.x5 +  pm.pdm.x6 ,
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 + pm.pdm.x4 + pm.pdm.x5 +  pm.pdm.x6 + pm.pdm.x7 ,
     data = df.dca.eval,
     thresholds = seq(0, 0.5, 0.05),
     label = list(  
@@ -1137,7 +1183,8 @@ plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 
   pm.pdm.x2 = "SDOH",  
   pm.pdm.x4 = "UrineVar",
   pm.pdm.x5 = "Var2",
-  pm.pdm.x6 = "Full"
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
 )) %>%
   plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
   
@@ -1153,6 +1200,8 @@ bm.dm.x3 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Fasting)#, weights = 
 bm.dm.x4 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Urine.Var)#, weights = sample.ogtt.weight)
 bm.dm.x5 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Var2)#, weights = sample.ogtt.weight)
 bm.dm.x6 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Full)#, weights = sample.ogtt.weight)
+bm.dm.x7 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.FIB4)#, weights = sample.ogtt.weight)
+
 
 ## pm = pred.model
 df.dca.eval <- df.dca.eval %>% 
@@ -1162,10 +1211,26 @@ df.dca.eval <- df.dca.eval %>%
   mutate(pm.dm.x3 = broom::augment(bm.dm.x3, type.predict="response") %>% pull(".fitted")) %>% 
   mutate(pm.dm.x4 = broom::augment(bm.dm.x4, type.predict="response") %>% pull(".fitted")) %>% 
   mutate(pm.dm.x5 = broom::augment(bm.dm.x5, type.predict="response") %>% pull(".fitted")) %>% 
-  mutate(pm.dm.x6 = broom::augment(bm.dm.x6, type.predict="response") %>% pull(".fitted"))  
+  mutate(pm.dm.x6 = broom::augment(bm.dm.x6, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x7 = broom::augment(bm.dm.x7, type.predict="response") %>% pull(".fitted"))   
   
 
-plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c + pm.dm.x1 + pm.dm.x2 + pm.dm.x3 + pm.dm.x4 + pm.dm.x5 + pm.dm.x6 ,
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 + pm.pdm.x4 + pm.pdm.x5 +  pm.pdm.x6 + pm.pdm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c + pm.dm.x1 + pm.dm.x2 + pm.dm.x3 + pm.dm.x4 + pm.dm.x5 + pm.dm.x6 + pm.dm.x7 ,
     data = df.dca.eval,
     thresholds = seq(0, 0.5, 0.05),
     label = list(  
@@ -1175,25 +1240,189 @@ plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c + pm.dm.x1 + pm.dm.x2 + pm.dm.x3 + pm.dm.
   pm.dm.x2 = "SDOH",
   pm.dm.x4 = "UrineVar",
   pm.dm.x5 = "Var2",
-  pm.dm.x6 = "Full"
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
 )) %>% 
   plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
 
 
 
 
-grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) 
-
-```
-
-```{r}
-
-
-
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
 
 ```
 
 
+
+
+
+
+```{r DCA plots, Full}
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c   + pm.pdm.x5 +  pm.pdm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c   + pm.dm.x5 +  pm.dm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Var2",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
+
+
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
+```
+
+
+```{r DCA plots, Minimal }
+
+
+
+x0.pdm.roc <- tidy(AUC::roc(x0.a1c,x0.igt))
+x1.pdm.roc <- tidy(AUC::roc(x1,x0.igt))
+x2.pdm.roc <- tidy(AUC::roc(x2,x0.igt))
+x3.pdm.roc <- tidy(AUC::roc(x3,x0.igt))
+x4.pdm.roc <- tidy(AUC::roc(x4,x0.igt))
+x5.pdm.roc <- tidy(AUC::roc(x5,x0.igt))
+x6.pdm.roc <- tidy(AUC::roc(x6,x0.igt))
+
+x0.dm.roc <- tidy(AUC::roc(x0.a1c,x0.pphg))
+x1.dm.roc <- tidy(AUC::roc(x1,x0.pphg))
+x2.dm.roc <- tidy(AUC::roc(x2,x0.pphg))
+x3.dm.roc <- tidy(AUC::roc(x3,x0.pphg))
+x4.dm.roc <- tidy(AUC::roc(x4,x0.pphg))
+x5.dm.roc <- tidy(AUC::roc(x5,x0.pphg))
+x6.dm.roc <- tidy(AUC::roc(x6,x0.pphg))
+
+alpha.scale = 0.7
+plot.roc.eval.pdm <- ggplot() + ggtitle("Pre-Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.pdm.roc %>% filter(cutoff==5.7), aes(fpr, tpr,color="A1c",size="5.7"),alpha=alpha.scale) + 
+  geom_line(data=x0.pdm.roc, aes(fpr, tpr,color="A1c"),alpha=alpha.scale) + 
+  geom_line(data=x1.pdm.roc, aes(fpr, tpr,color="Base"),alpha=alpha.scale) + 
+  geom_line(data=x3.pdm.roc, aes(fpr, tpr,color="Fasting"),alpha=alpha.scale) + 
+  #geom_line(data=x2.pdm.roc, aes(fpr, tpr,color="SDOH"),alpha=alpha.scale) + 
+  #geom_line(data=x4.pdm.roc, aes(fpr, tpr,color="UrineVar"),alpha=alpha.scale) + 
+  geom_line(data=x5.pdm.roc, aes(fpr, tpr,color="Var.2"),alpha=alpha.scale) + 
+  #geom_line(data=x6.pdm.roc, aes(fpr, tpr,color="Full"),alpha=alpha.scale) + 
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") + annotation_custom(df.stats.pdm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4) 
+  
+plot.roc.eval.dm <-ggplot() + ggtitle("Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.dm.roc %>% filter(cutoff==6.4), aes(fpr, tpr,color="A1c",size="6.4"),alpha=alpha.scale) + 
+  geom_line(data=x0.dm.roc, aes(fpr, tpr,color="A1c",),alpha=alpha.scale) + 
+  geom_line(data=x1.dm.roc, aes(fpr, tpr,color="Base",),alpha=alpha.scale) +
+  geom_line(data=x3.dm.roc, aes(fpr, tpr,color="Fasting",),alpha=alpha.scale) +
+  #geom_line(data=x2.dm.roc, aes(fpr, tpr,color="SDOH",),alpha=alpha.scale) +
+  #geom_line(data=x4.dm.roc, aes(fpr, tpr,color="UrineVar",),alpha=alpha.scale) +
+  geom_line(data=x5.dm.roc, aes(fpr, tpr,color="Var.2",),alpha=alpha.scale) +
+  #geom_line(data=x6.dm.roc, aes(fpr, tpr,color="Full",),alpha=alpha.scale) +
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") +  annotation_custom(df.stats.dm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4)     
+
+grid.arrange(ncol=2,plot.roc.eval.pdm,plot.roc.eval.dm)
+
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x3   + pm.pdm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c  + pm.dm.x3 + pm.dm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Var2",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
+
+
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
+
+
+
+
+
+```
+
+
+```{r For Significance Section}
+fn.dist.plot <-df %>% drop_na(a1c,two) %>%  mutate(A1c = if_else(a1c<5.7,"A1c < 5.7",if_else(a1c>=5.7 & a1c<6.5,"5.7 ≤ A1c < 6.5","A1c ≥ 6.5")), TWO=if_else(two>=200, "Diabetes\nby 2-hour\nGlucose\n","No Diabetes\nby 2-hour\nGlucose"))  %>% mutate(A1c = factor(A1c,levels=c("A1c < 5.7","5.7 ≤ A1c < 6.5","A1c ≥ 6.5"))) %>% ggplot() + geom_jitter(aes(x=A1c,y=two,color=TWO)) + labs(title="NHANES 2005-2016 Data\n",color="Diagnosis",tag="A") + xlab("Hemoglobin A1c (%)") + ylab("Two-hour Glucose from OGTT") + theme(plot.tag.position = c(0.0, 0.98)) + theme_bw()
+
+
+scale_color_Sig <- function(...){
+    ggplot2:::manual_scale(
+        'color', 
+        values = setNames(c('brown','orange','red', 'blue', 'purple'), c("Treat All","Treat None","A1c","Fasting","Additional\nLabs")), 
+        ...
+    )
+}
+
+alpha.scale=1
+plot.roc.eval.dm <-ggplot() + ggtitle("Evaluation Model ROCs\nfor Diabetes Diagnosis") + 
+  #geom_point(data=x0.dm.roc %>% filter(cutoff==6.4), aes(fpr, tpr,color="A1c",size="6.4"),alpha=alpha.scale) + 
+  geom_line(data=x0.dm.roc, aes(fpr, tpr,color="A1c",),alpha=alpha.scale,linewidth=1) + 
+  #geom_line(data=x1.dm.roc, aes(fpr, tpr,color="Base",),alpha=alpha.scale) +
+  geom_line(data=x3.dm.roc, aes(fpr, tpr,color="Fasting",),alpha=alpha.scale,linewidth=1) +
+  #geom_line(data=x2.dm.roc, aes(fpr, tpr,color="SDOH",),alpha=alpha.scale) +
+  #geom_line(data=x4.dm.roc, aes(fpr, tpr,color="UrineVar",),alpha=alpha.scale) +
+  geom_line(data=x5.dm.roc, aes(fpr, tpr,color="Additional\nLabs",),alpha=alpha.scale,linewidth=1) +
+  #geom_line(data=x6.dm.roc, aes(fpr, tpr,color="Full",),alpha=alpha.scale) +
+  labs(color="Data",size="A1c Threshold",tag="B") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") +  #annotation_custom(df.stats.dm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4)     + 
+  theme(plot.tag.position = c(0.0, 0.98))  + scale_color_Sig() + theme_bw()
+
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c  + pm.dm.x3 + pm.dm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Additional\nLabs",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Decision Curves\nfor Diabetes Diagnosis') + labs(tag="C") + theme(plot.tag.position = c(0, 0.98)) + scale_color_Sig()
+
+
+grid.arrange(ncol=3,fn.dist.plot,plot.roc.eval.dm,plot.dca.eval.dm) %>% suppressWarnings()
+
+```
 
 
 ```{r }
@@ -1322,7 +1551,7 @@ f.pROC.auc <- function(x,predictor.x,response.x)  pROC::auc(pROC::roc_(data=x,pr
 
 #pROC::coords(pROC::roc_(data=x,predictor=y,response=z),ret=c("threshold", "sensitivity","specificity", "accuracy","precision"),"best")
 
-f.pROC.prec(x,y,z)
+#f.pROC.prec(x,y,z)
 
 f.df.stat <- function(x,y,z) data.frame(
   "Type" = "best",
@@ -1419,6 +1648,9 @@ df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<7) %>% sample_n(size=1
 ```
 
 ```{r}
+f.get.thresh <- function(r,s) df.stat.2[df.stat.2$Rowname==r & df.stat.2$Diagnosis==s,"threshold"]
+
+
 office_test[int.resample.test,] %>% 
   mutate(A1c.PDM = a1c >= 5.7 & a1c < 6.5 ) %>%
   mutate(Base.PDM = Pred.Base >= f.get.thresh("Pred.Base",s) & Pred.Base < f.get.thresh("Pred.Base","DM") )%>%
