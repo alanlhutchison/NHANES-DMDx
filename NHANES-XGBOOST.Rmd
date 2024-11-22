@@ -438,8 +438,8 @@ xgb_tuned.full.29 <- caret::train(
 
 ```{r}
 ## creates xgb_tuned.25
-save(xgb_tuned.full.29,file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
-#load(file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
+#save(xgb_tuned.full.29,file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
+load(file="~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.10.27.Rda")
 #xgb_tuned <- xgb_tuned.25
 ```
 
@@ -812,7 +812,8 @@ office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
 office_test$two <- label.test
 office_test$sample.ogtt.weight <-  weight.sample.test
 save(office_test,file='~/Documents/NHANES15-16/NHANES-office-test-layered_2024.11.05.Rda')
-
+list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2)
+save(list.models,file="~/Documents/NHANES15-16/NHANES-A1c-lt-6.5-xgb.models")
 
 #office_test$Pred.26 <- predict(xgb.model.26,dtest)
 ```
