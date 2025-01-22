@@ -1,0 +1,2212 @@
+---
+title: "NHANES-XGBOOST"
+author: "alanlhutchison"
+date: "2024-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## XGBOST CODE
+
+This code takes the DF file and renames and winnows down the features, then applies various XGBOOST models to generate output figures for the NHANES DxDM manuscript.
+
+```{r Libraries, include=FALSE,echo=FALSE}
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+
+#install.packages('nhanesA')
+#install.packages('foreign')
+#install.packages("xgboost")
+#install.packages("caret")
+#install.packages("dplyr")
+
+library(xgboost)
+library(caret)
+library(dplyr)
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+library(Hmisc)
+library(glmnet)
+library(tidymodels)
+library(data.table)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+load('df.master-2024.08.18.Rda')
+```
+
+
+
+
+```{r Making DF.MASTER}
+
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+
+
+df <- df.master %>% 
+  mutate(LBXIN = if_else(!is.na(LBXIN.x),LBXIN.x,LBXIN.y )) %>% select(-LBXIN.x) %>% select(-LBXIN.y) %>% 
+  mutate(WTSAF2YR = if_else(!is.na(WTSAF2YR.x),WTSAF2YR.x,WTSAF2YR.y ))  %>% select(-WTSAF2YR.x) %>% select(-WTSAF2YR.y) %>% 
+  
+  ### We are going to update everything match 2015-2016 as best we can
+  mutate(
+  ### INS adjustment
+  #### Insulin (2011 & post-2011) = 0.8868*Insulin (pre-2011) + [0.0011*Insulin (pre-2011)**2] – 0.0744.  
+  LBXIN = if_else(Year < 2011, 0.8868*LBXIN + (0.0011*LBXIN**2) - 0.0744, LBXIN )) %>% 
+  mutate(
+  #### Insulin (Tosoh-equivalent 2013 & post-2013) = 10**(1.024*log10(Roche insulin 2011-2012) – 0.0802)
+  LBXIN = if_else(Year < 2013, 10**(1.024*log10(LBXIN) - 0.0802),LBXIN),
+  ### GLU adjustment
+  ### Y (Roche ModP 2007) = X (Roche 911 2005-2006) + 1.148, n=143, r=0.997, slope was not significant.
+  LBXGLU = if_else(Year < 2007, LBXGLU + 1.148, LBXGLU),
+  LBXGLT = if_else(Year < 2007, LBXGLT + 1.148, LBXGLT),
+  ## FPG
+  ) %>% 
+  mutate(
+  ### GLU Forward: Y (C311 2015-2016) = 1.023 (95%CI: 1.014 – 1.032) * X (C501 2013-2014) - 0.5108 (95%CI: -1.441 – 0.4197)
+  LBXGLU = if_else(Year < 2015, 1.023 * LBXGLU - 0.5108, LBXGLU  ),
+  LBXGLT = if_else(Year < 2015, 1.023 * LBXGLT - 0.5108, LBXGLT ),
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR),
+  ### UCr adjustment for < 2007,
+  #### Urine Creatinine < 75: Y(adjusted Creatinine) = [1.02*sqrt(X, unadjusted Creatinine) – 0.36]**2
+  #### Urine Creatinine 75 to < 250: Y(adjusted Creatinine) = [1.05*sqrt(X, unadjusted Creatinine) – 0.74]**2
+  #### Urine Creatinine >=250: Y(adjusted Creatinine) = [1.01*sqrt(X, unadjusted Creatinine) – 0.10]**2
+  URXUCR = if_else(Year < 2007,
+                   if_else(URXUCR < 75, (1.02*sqrt(URXUCR) - 0.36)**2,
+                           if_else(URXUCR >= 250,
+                                   (1.01*sqrt(URXUCR) - 0.10)**2,
+                                   (1.05*sqrt(URXUCR) - 0.74)**2 )
+                          ),
+                   URXUCR)
+  ) %>% 
+
+  rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
+         sample.interview.weight = WTINT2YR,
+         sample.mec.weight = WTMEC2YR,
+                           ## Alcohol survey
+                           alc.one.per.month = ALQ101, alc.12.lifetime = ALQ110, alc.often.year = ALQ120Q, alc.often.year.unit = ALQ120U,
+                           alc.per.day = ALQ130, alc.4.5.per.day = ALQ141Q, alc.4.5.per.day.unit = ALQ141U, alc.4.5.day.ever = ALQ151, alc.4.5.2.hours = ALQ160, 
+              ## Urine
+              u.alb = URXUMA,u.cr = URXUCR, # urine albumin, urine creatinine
+              ## Anthropometrics
+
+             # htn.ever = BPQ020, htn.2times = BPQ030, htn.age = BPD035, htn.pharm = BPQ040A, htn.taking.meds = BPQ050A, 
+              ## HLD questinos
+              hld.ever = BPQ080, hld.checked = BPQ060, hld.last = BPQ070, hld.pharm = BPQ090D, hld.taking.meds = BPQ100D,
+              ## CBC
+              wbc = LBXWBCSI, rbc = LBXRBCSI, hg = LBXHGB, mcv = LBXMCVSI, plt = LBXPLTSI, mpv = LBXMPSI, # WBC, RBC, Hg, MCV, PLT, MPV
+              ## CMP
+              alt = LBXSATSI, alb = LBXSAL, alp = LBXSAPSI, ast = LBXSASSI, # ALT, albumin, ALP, AST
+              ## CMP
+              bicarb = LBXSC3SI, bun = LBXSBU, chlor = LBXSCLSI, choles = LBXSCH, # Bicarb,  BUN, Chlor, Chol serum
+              ## CMP
+              cpk = LBXSCK, cr = LBXSCR, ggt = LBXSGTSI, gluc = LBXSGL, # CPK, Creat, GGT, Gluc
+              ## CMP
+              iron = LBXSIR, ldh = LBXSLDSI, phos = LBXSPH, potas = LBXSKSI, #Iron, LDH, Phos, K
+              ## CMP
+              na = LBXSNASI, tbili = LBXSTB, cal = LBXSCA, tprot = LBXSTP, # Na, TBili, Cal, TProt
+              tgy = LBXSTR, urica = LBXSUA, # TGY, UricAcid
+              ## DEXA
+              #dexa.valid = DXAEXSTS, 
+              dexa.body = DXXAGST,  # valid DEXA==1, valid android/gynoid DEXA==1
+              android.fat.mass = DXXANFM, android.lean.mass = DXXANLM, android.total.mass = DXXANTOM, gynoid.fat.mass = DXXGYFM, gynoid.lean.mass = DXXGYLM,
+              gynoid.total.mass = DXXGYTOM, android.to.gynoid = DXXAGRAT, android.percent.fat = DXXAPFAT, gynoid.percent.fat = DXXGPFAT, subcut.fat.area = DXXSATA, subcut.fat.mass = DXXSATM, sub.fat.vol = DXXSATV, tot.abd.fat.area = DXXTATA, total.abd.fat.mass = DXXTATM, total.abd.fat.vol = DXXTATV, visc.adi.tissue.area = DXXVFATA, visc.adi.tissue.mass = DXXVFATM, visc.adi.tissue.vol = DXXVFATV, 
+              ## Blood markers
+              #ferritin = LBXFER, 
+             #folate = LBDRFO, # Ferritin**, Folate,
+              fpg = LBXGLU, # FPG**, 
+              ## Hepatitis C
+              HepC.VL = LBXHCR, 
+              HepC.Geno= LBXHCG, # HepC CL, Hep C genotype
+              insulin = LBXIN, # Insulin
+              ## Vital Signs
+              pulse = BPXPLS, reg.iregg = BPXPULS, sbp1 = BPXSY1, dbp1 = BPXDI1, sbp2 = BPXSY2, dbp2 = BPXDI2,  sbp3=BPXSY3,dbp3=BPXDI3,# Pulse, regular / irregular, SBP1, DBP1, SBP2,DBP2
+              ## Cholesterol
+              #hdl = LBDHDD, 
+              #t.chol = LBXTC, #HDL, serum total cholesterol,
+              ## Weight Survey
+              dr.told.weight = MCQ365A, dr.told.exercise = MCQ365B, dr.told.salt = MCQ365C, dr.told.diet=MCQ365D,
+              weight.control.now=MCQ370A,exercise.increase.now=MCQ370B,salt.reducing.now=MCQ370C,fat.reduce.now=MCQ370D, # diabetes questionaire
+              a1c = LBXGH, #glycohemoglobin
+              ## Viral 
+              Hep.A = LBXHA, # Hep A
+              HepB.cAb = LBXHBC, Hep.sAg = LBDHBG, HepD = LBDHD, # HepB cAb, HepB sAg, HepD
+              HepB.sAb = LBXHBS, # HepB sAb
+              HepE.G = LBDHEG, HepE.M = LBDHEM, # HepE IgG, IgM
+              #HSV1.Ab = LBXHE1, HSV2.Ab = LBXHE2, # HSV1 Ab, HSV2 Ab
+              #HIV = LBXHIVC, HIV1 = LBXHIV1, HIV2 = LBXHIV2, HIV.NAT = LBXHNAT, # HIV
+              ## Liver survey
+              Liver.Ever = MCQ160L, Liver.Still =  MCQ170L, Liver.Age = MCQ180L, # Any liver condition, do you still have liver condition, age when you were told you had liver condition
+              sample.ogtt.weight = WTSOG2YR, two = LBXGLT,  # subsample weight, two hour glucose (mg/dL),
+              two.mmol = LBDGLTSI, admin.time = GTDSCMMN, # two hour glucose (mmol/L), adiminstration time,
+              ogtt.time.gluc.chall = GTDDR1MN, ogtt.time.gluc.ogtt = GTDBL2MN, # time from fast glucose and challenge,Time from fasting glucose & OGTT (min),
+              ogtt.time.total=GTDDR2MN,ogtt.amount = GTXDRANK, ogtt.incomplete = GTDCODE,  # Time from glucose challenge & OGTT(min),Amount of glucose challenge drank, Incomplete OGTT Comment Code
+              #transferr = LBXTFR, # Transferrin receptor (mg/L)
+              sample.fasting.weight = WTSAF2YR, #Fasting Subsample 2 Year MEC Weight
+              #tryg = LBXTR, ldlc = LBDLDL, # Triglyceride (mg/dL), LDL-cholesterol (mg/dL)
+              #total.testosterone = LBXTST, testosterone.comment = LBDTSTLC, estradiol = LBXEST, estradiol.comment = LBDESTLC, shbg = LBXSHBG, shbg.comment = LBDSHGLC, # Testosterone, total (ng/dL), Testosterone comment code,  Estradiol (pg/mL), Estradiol Comment Code, SHBG (nmol/L), SHBG Comment Code
+dm.told = DIQ010, dm.age=DID040, pdm.told = DIQ160, dm.told.ever = DIQ170, dm.feel.risk=DIQ172,
+dm.famhx = DIQ175A, dm.risk.overweight = DIQ175B, dm.risk.age = DIQ175C, dm.risk.diet=DIQ175D,
+dm.risk.race = DIQ175E, dm.risk.weight = DIQ175F, dm.risk.physc = DIQ175G, dm.risk.htn = DIQ175H, dm.risk.hyper = DIQ175I, dm.risk.hld = DIQ175J, dm.risk.hypo = DIQ175K, dm.risk.hunger=DIQ175L, dm.risk.numb = DIQ175M, dm.risk.blur = DIQ175N, dm.risk.fatigue = DIQ175O, dm.risk.anyone = DIQ175P, dm.risk.doctor = DIQ175Q, dm.risk.other= DIQ175Q, dm.risk.gest = DIQ175S, dm.risk.urine = DIQ175T, dm.risk.thirst = DIQ175U, dm.risk.crave = DIQ175V, dm.risk.meds = DIQ175W, dm.risk.PCOS=DIQ175X, dm.test.3yrs = DIQ180, dm.taking.insulin.now = DIQ050, dm.insulin.how.long = DID060, dm.insulin.length.unit = DIQ060U,
+dm.taking.pills.now = DIQ070, dm.saw.dr.how.long = DIQ230, dm.dr = DIQ240, dm.dr.past.year = DID250, dm.check.freq = DID260, dm.check.freq.unit = DIQ260U, dm.check.a1c = DIQ275, dm.last.A1c = DIQ280, dm.a1c.goal = DIQ291, dm.recent.sbp = DIQ300S, dm.recent.dbp = DIQ300D, dm.sbp.goal = DID310S, dm.dbp.goal = DID310D, dm.recent.ldl = DID320, dm.ldl.goal = DID330, dm.dr.check.sores = DID341, dm.self.check.feet = DID350, dm.self.check.feet.units =DIQ350U,dm.last.pupils = DIQ360, dm.retin = DIQ080,
+CHF.ever = MCQ160B, CHF.age = MCQ180B, CAD.ever = MCQ160C, CAD.age = MCQ180C, anigina.ever = MCQ160D, angina.ga = MCQ180D, HA.ever = MCQ160E, HA.age = MCQ180E, stroke.ever = MCQ160F, stroke.age = MCQ180F, thyroid.ever = MCQ160M, thyroid.still = MCQ170M, thyroid.age = MCQ180M, jaundice.ever = MCQ203, jaundice.age = MCQ206, cancer.ever = MCQ220,cancer.type.a = MCQ230A, cancer.type.b = MCQ230B, cancer.type.c = MCQ230C, cancer.type.d = MCQ230D,
+relative.HA = MCQ300A, relative.asthma=MCQ300B, relative.dm = MCQ300C,
+#vigorous.work.yes=PAQ605, days.vigorous.work=PAQ610, min.vigorous.work=PAD615, mod.work.yes=PAQ620,days.mod.work=PAQ625,min.mod.work=PAD630,
+#vigorous.rec.yes=PAQ650,days.vig.rec=PAQ655,min.vig.rec=PAD660,
+#mod.rec.yes=PAQ665,days.mod.rec=PAQ670,min.mod.rec=PAD675,
+
+### Body Measures
+Weight = BMXWT,
+Height.Stand = BMXHT,
+BMI = BMXBMI,
+Arm.Circ = BMXARMC,
+Waist.Circ = BMXWAIST,
+Thigh.Circ = BMXTHICR,
+Triceps.Skin = BMXTRI,
+
+    # Sleep Measures
+     Usual.Sleep.Time.Week= SLQ300,
+     Usual.Wake.Time.Week = SLQ310,
+     
+     #Sleep.Hours.Week= SLD012,
+     #Usual.Sleep.Time.Weekend = SLQ320,
+     #Usual.Wake.Time.Weekend = SLQ330,
+     #Sleep.Hours.Weekend = SLD013,
+     #Snore.Often = SLQ030,
+     #Snort.Apnea.Often = SLQ040,
+     #Told.Dr.Trouble.Sleeping = SLQ050,
+     #Overly.Sleepy.Often = SLQ120,
+
+   How.Much.Sleep.Hr = SLD010H,
+   How.Long.Fall.Asleep.Min = SLD020M,
+   Often.Snore = SLQ030,
+   Often.Snort.Apnea = SLQ040,
+   Dr.Told.Sleep.Disorder = SLQ060,
+   Told.Sleep.Apnea = SLQ070A,
+   Told.Insomnia = SLQ070B,
+   Told.Restless.Legs= SLQ070C,
+   Told.Sleep.Disorder.Other = SLQ070D,
+   How.Often.Trouble.Falling.Asleep = SLQ080,
+   How.Often.Wake.Up.At.Night = SLQ090,
+   How.Often.Wake.Too.Early = SLQ100,
+   How.Often.Feel.Unrested = SLQ110,
+   How.Often.Feel.Sleepy = SLQ120,
+   How.Often.Not.Enough.Sleep = SLQ130,
+   How.Often.Sleeping.Pills = SLQ140,
+   How.Often.Leg.Jerks = SLQ150,
+   How.Often.Leg.Cramp = SLQ160,
+   Difficulty.Concentrating.When.Tired = SLQ170,
+   Difficulty.Remembering.When.Tired = SLQ180,
+   Difficulty.Eating.When.Tired = SLQ190,
+   Difficulty.Hobby.When.Tired = SLQ200,
+   Difficulty.Getting.Things.Done = SLQ210,
+   Difficulty.Finance.Tired = SLQ220,
+   Difficulty.Work.Tired = SLQ230,
+   Difficulty.Phone.Tired = SLQ240,
+   Sleep.Hours = SLD012,
+
+  Grip.Test.Status = MGDEXSTS,
+  Surgery.Hands.Ever = MGD050,
+  Surgery.Which.Hand = MGD060,
+  Recent.Pain.R.Hand = MGQ070,
+  Cause.Pain.R.Hand = MGQ080,
+  Pain.R.Hand.Worse = MGQ090,
+  Recent.Pain.L.Hand = MGQ100,
+  Cause.Pain.L.Hand = MGQ110,
+  Pain.L.Hand.Worse = MGQ120,
+  Dom.Hand = MGD130,
+  Angle.90.Index.Finger = MGQ90DG,
+  Testing.Position = MGDSEAT,
+  Hand.Practice = MGAPHAND,
+  Hand.Begin = MGATHAND,
+  Grip.Hand.1.Test.1.kg = MGXH1T1,
+  Grip.Hand.1.Test.1.Effort = MGXH1T1E,
+  Grip.Hand.2.Test.1.kg = MGXH2T1,
+  Grip.Hand.2.Test.1.Effort = MGXH2T1E,
+  Grip.Hand.1.Test.2.kg = MGXH1T2,
+  Grip.Hand.1.Test.2.Effort = MGXH1T2E,
+  Grip.Hand.2.Test.2.kg = MGXH2T2,
+  Grip.Hand.2.Test.2.Effort = MGXH2T2E,
+  Grip.Hand.1.Test.3.kg = MGXH1T3,
+  Grip.Hand.1.Test.3.Effort = MGXH1T3E,
+  Grip.Hand.2.Test.3.kg = MGXH2T3,
+  Grip.Hand.2.Test.3.Effort = MGXH2T3E,
+  Comb.Grip.Strength.kg = MGDCGSZ
+) %>% 
+  ### COMBINE LANGUAGES
+ mutate(SIALANG=as.integer(SIALANG=='Spanish'),MIALANG=as.integer(MIALANG=='Spanish'),FIALANG=as.integer(FIALANG=='Spanish')) %>% rowwise() %>%  mutate(LANG=sum(SIALANG,MIALANG, FIALANG,na.rm=TRUE)) %>% select(-c(SIALANG,MIALANG,FIALANG)) %>% ungroup() %>% 
+  mutate(Sleep.Hours = if_else(is.na(Sleep.Hours),How.Much.Sleep.Hr,Sleep.Hours)) %>% select(-How.Much.Sleep.Hr) %>% 
+  ### COMBINE BLOOD PRESSURE
+  mutate(SBP = ( f.na.to.0(sbp1)+f.na.to.0(sbp2)+f.na.to.0(sbp3)) / (f.na.or.low(sbp1) + f.na.or.low(sbp2) + f.na.or.low(sbp3) ) )    %>% mutate(DBP = ( f.na.to.0(dbp1)+f.na.to.0(dbp2)+f.na.to.0(dbp3)) / ( f.na.or.low(dbp1) + f.na.or.low(dbp2) + f.na.or.low(dbp3) ) )  %>% 
+  select(-sbp1,-sbp2,-dbp1,-dbp2,-sbp3,-dbp3) %>% 
+  ### FIX WEIGHTS
+  mutate(sample.fasting.weight = sample.fasting.weight / 6,
+         sample.ogtt.weight = sample.ogtt.weight / 6,
+         sample.interview.weight = sample.interview.weight / 6,
+         sample.mec.weight = sample.mec.weight / 6) %>%  # combining across 6 cycles
+select(-Year.x,-Year.y)  %>%  
+  ### Naming variables based on LASSO identification
+  rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>% 
+  ### Excluding labels that would be artefactual or duplicative
+
+  select(-Data.Release.Cycle,) %>% 
+  select(-c(TProt.g.L,UrineAlb.mg.L,Tbili.umol,phosphorus.mmol,triglycerides.mmol,glucose.mmol,BP.Arm,Seg.Neut.num,gluc,UricA)) %>% 
+  rename(Osmolality=LBXSOSSI,Num.Family=DMDFMSIZ,Arm.Length=BMXARML,BPCuff.Max.Inflation=BPXML1,Pulse.Site=BPXPTY,Globulin=LBXSGB,BP.Enhancement.3=BPAEN3,UpperLeg.Length=BMXLEG,TransfusionEver=MCQ092,Eos.Num=LBDEONO,BP.Enhancement.2=BPAEN2,CitizenStatus=DMDCITZN,Baso.Num=LBDBANO,MCHC=LBXMC,Chol.mmol=LBDSCHSI,fpg.mmol=LBDGLUSI,Calcium.mmol=LBDSCASI,UrineCr.mmol=URXCRS,Lympho.Num = LBDLYMNO,Mono.num=LBDMONO,Told.Asthma = MCQ010,BUN.mmol=LBDSBUSI,Baso.Perc=LBXBAPCT,Globulin.g.L=LBDSGBSI, BP.Ever.Told.High = BPQ020, Sleep.Ever.Told.Poor = SLQ050, ,Cr.umol = LBDSCRSI) %>% 
+  select(-c(Calcium.mmol,Chol.mmol,fpg.mmol,Baso.Num,Eos.Num,BP.Enhancement.2,Pulse.Site,BP.Enhancement.3,sample.interview.weight,BUN.mmol,sample.mec.weight,Globulin.g.L,Arm.Length,UpperLeg.Length)) %>% 
+  ### PROXY AND INTERPRETER
+  ### PROXY and INTERPRETER 
+  mutate(Proxy.Used = f.yes1.no0(Proxy.Used),Proxy.Mec.Used=f.yes1.no0(Proxy.Mec.Used),Interpreter.SP.interview=f.yes1.no0(Interpreter.SP.interview),Interpreter.Used=f.yes1.no0(Interpreter.Used),Interpreter.MIA=f.yes1.no0(Interpreter.MIA),FIAPROXY=f.yes1.no0(FIAPROXY)) %>% rowwise() %>% mutate(PROXY=sum(Proxy.Used,Proxy.Mec.Used,na.rm=TRUE),INTERPRETER=sum(Interpreter.Used,Interpreter.MIA,Interpreter.SP.interview,na.rm=TRUE)) %>% ungroup()  %>% mutate(PROXY=as.integer(PROXY>0),INTERPRETER=as.integer(INTERPRETER>0)) %>% 
+  select(-c(Proxy.Used,Proxy.Mec.Used,Interpreter.SP.interview,Interpreter.Used,Proxy.Mec.Used,Interpreter.Used,Interpreter.MIA,FIAPROXY,sample.fasting.weight,Head.Household.Age,Masked.Var.Pseduocode)) %>% 
+  rename(Masked.Var.Pseduo.Strat = SDMVSTRA,Enhance.BP1 = BPAEN1) %>% 
+  select(-c(Masked.Var.Pseduo.Strat,Enhance.BP1,two.mmol,UrineCr.mmol,Cr.umol,Time.of.Survey)) %>% rename(RaceEth=RIDRETH1,Marriage.Status=DMDHRMAR,EduLevel=DMDHREDU) %>% 
+rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>% 
+  select(-c(SEQN,BMI,BPCuff.Max.Inflation,iron.umol,Lympho.Num,alb.g.L,BMDSTATS)) %>% 
+  rename(Ever.Told.Overweight = MCQ080,Cuff.Size=BPACSZ) %>% 
+  select(-c(Cuff.Size,RIDSTATR,Gender.HeadHousehold,INTERPRETER,PROXY,Mono.num,Num.Family)) %>% 
+  ### Don't Know to Don't know
+  mutate(Marriage.Status=if_else(Marriage.Status=="Don't Know","Don't know",Marriage.Status)) %>% 
+  mutate(Anemia.Treatment=if_else(Anemia.Treatment=="no","No",Anemia.Treatment)) %>% 
+  mutate(EduLevel=if_else(EduLevel=="Don't Know","Don't know",EduLevel)) %>% 
+  filter(dm.taking.insulin.now!="Yes") %>% select(-dm.taking.insulin.now)
+ 
+#rename()
+#select(-c())
+
+
+#df %>% select(vigorous.work.yes, days.vigorous.work, min.vigorous.work,mod.work.yes,days.mod.work,min.mod.work,vigorous.rec.yes,days.vig.rec,min.vig.rec,mod.rec.yes,days.mod.rec,min.mod.rec) %>% 
+ # mutate(Phys.Act = if_else(vigorous.work.yes==1,days.vigorous.work*min.vigorous.work,0) +
+  #         if_else(mod.work.yes==1,days.mod.work*min.mod.work,0) + 
+   #        if_else(vigorous.rec.yes==1,days.vig.rec*min.vig.rec,0) + 
+    #       if_else(mod.rec.yes==1,days.mod.rec*min.mod.rec,0) )
+```
+
+
+
+
+```{r FILTER ON SOMETHING}
+
+df.small <- df %>% drop_na(a1c,two,sample.ogtt.weight)
+
+#df.small <- df.small %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>1.3)  %>% select(-FIB4)
+#df.small <- df.small %>% filter(hg < 13)
+#df.small <- df.small %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>2)  %>% select(-FIB4)
+#df.small <- df.small %>% filter(cr>1) 
+#df.small <- df.small %>% filter(alb<4.1) 
+#df.small <- df.small %>% filter(Age > 50) 
+
+
+dir.string <-"~/Documents/NHANES15-16/"
+
+# df.small <- df.small %>% filter(Age > 50) 
+# filter.string <- "Age>50"
+
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>25) %>% select(-BMI)
+# filter.string <- "BMI>25"
+# 
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>30) %>% select(-BMI)
+# filter.string <- "BMI>30"
+# 
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>35) %>% select(-BMI)
+# filter.string <- "BMI>35"
+# 
+# df.small <- df.small %>% filter(SBP > 130)
+# filter.string <- "SBP>130"
+# 
+# df.small <- df.small %>% filter(ggt > 40)
+# filter.string <- "ggt>40"
+# 
+# df.small <- df.small %>% filter((Waist.Circ > 100 & Gender=="Male" )| (Waist.Circ > 90 & Gender=="Female" ))  #cm
+# filter.string <- "WC>100"
+#
+df.small <- df.small %>% filter((Waist.Circ > 110 & Gender=="Male" )| (Waist.Circ > 105 & Gender=="Female" ))  #cm
+filter.string <- "WC>110"
+
+file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_",filter.string,"_2024.12.11.Rda")
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_",filter.string,"_2024.12.11.Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_",filter.string,"_2024.12.11.Rda")
+file.list.models <- paste0(dir.string,"NHANES-A1c-",filter.string,"-All-xgb.models")
+
+
+file.ROCs=paste0(dir.string,"NHANES-A1c-",filter.string,"-All_ROCs.bmp" )
+file.importance.plots = paste0(dir.string,"NHANES-A1c-",filter.string,"-ImportancePlots.bmp" )
+file.dca.all = paste0(dir.string,"NHANES-A1c-",filter.string,"-DCA-all.bmp" )
+file.dca.fib4 = paste0(dir.string,"NHANES-A1c-",filter.string,"-DCA_FIB4.bmp" )
+
+file.dca.min = paste0(dir.string,"NHANES-A1c-",filter.string,"-DCA_min-set.bmp" )
+
+
+```
+
+
+```{r}
+
+
+
+
+df.nas <-lapply(df.small,function(x) (sum(!is.na(x))))  %>% data.frame()  %>% t() %>% data.frame()
+names(df.nas) <- 'Col1'
+df.nas %>% dim()
+
+df.small <- df.small[,df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% rownames()] 
+
+
+office_train <- df.small %>% filter(Year < 2015) #training(office_split)
+office_test <- df.small %>% filter(Year == 2015) # testing(office_split)
+
+year.train <- office_train$Year
+year.test <- office_test$Year
+label.train <- office_train$two
+label.test <- office_test$two
+weight.sample.train <- office_train$sample.ogtt.weight
+weight.sample.test <- office_test$sample.ogtt.weight
+office_train <- office_train %>% select(-c(sample.ogtt.weight,Year,two))
+office_test <- office_test %>% select(-c(sample.ogtt.weight,Year,two))
+
+
+
+```
+
+
+```{r}
+# XGBoost requires the data to be in xgb.DMatrix format
+set.seed(1234)
+int.resample.train <- resample(seq(1,dim(office_train)[1]),probs=weight.sample.train/sum(weight.sample.train),size=10000)
+int.resample.test <- resample(seq(1,dim(office_test)[1]),probs=weight.sample.test/sum(weight.sample.test),size=10000)
+office_train.resampled <- office_train[int.resample.train,]
+office_test.resampled <- office_train[int.resample.test,]
+
+label.train.resampled <- label.train[int.resample.train]
+label.test.resampled <- label.test[int.resample.test]
+#dtrain <- xgb.DMatrix(data = makeX(office_train.resampled), label = label.train[int.resample.train])
+#dtest <- xgb.DMatrix(data = makeX(office_test.resampled), label = label.test[int.resample.test])
+
+office_train.makeX <- makeX(office_train)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+office_test.makeX <- makeX(office_test)
+
+colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+
+
+f.align_columns <- function(ma, mb) {
+  # Get the column names for MA and MB
+  ma_columns <- colnames(ma)
+  mb_columns <- colnames(mb)
+  
+  # Identify the columns in MA but not in MB
+  missing_columns <- setdiff(ma_columns, mb_columns)
+  
+  # Add missing columns to MB, filled with zeros
+  for (col in missing_columns) {
+    zero_col <- matrix(0, nrow = nrow(mb), ncol = 1)
+    colnames(zero_col) <- col
+    mb <- cbind(mb, zero_col)
+  }
+  
+  # Reorder columns in MB to match the order in MA
+  mb <- mb[, ma_columns, drop = FALSE]
+  
+  return(mb)
+}
+
+f.add.makeX.columns <- function(x){
+  #x <- cbind(x,`Marriage.StatusDon't know`=0)
+  x <- cbind(x,`EduLevelHigh School Grad/GED or equivalent`=0)
+  #x <- cbind(x,`EduLevelRefused`=0)
+  x <- cbind(x,`Marriage.StatusRefused`=0)
+  return(x)
+}
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+
+
+```
+
+
+```{r}
+#colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+```
+
+
+
+```{r}
+###
+tune_grid.25 <- expand.grid(
+  nrounds = c(200,500,800),
+  eta = c(0.01,0.02),
+  max_depth = c(4,6),
+  subsample = c(0.5,0.9),
+  colsample_bytree = c(0.3,0.6,0.9),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+
+tune_grid.27 <- expand.grid(
+  nrounds = c(1500,2000),
+  eta = c(0.01,0.05),
+  max_depth = c(6),
+  subsample = c(0.6),
+  colsample_bytree = c(0.6),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+tune_grid.28 <- expand.grid(
+  nrounds = c(2000),
+  eta = c(0.05),
+  max_depth = c(6,8),
+  subsample = c(0.6,0.8),
+  colsample_bytree = c(0.6),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+
+
+tune_grid.29 <- expand.grid(
+  nrounds = c(2000),
+  eta = c(0.05),
+  max_depth = c(6),
+  subsample = c(0.6),
+  colsample_bytree = c(0.6,0.8),# bounded at maximum 1
+  min_child_weight = c(1,5),
+  gamma = c(0,5)
+)
+
+train_control <- trainControl(method = "cv", 
+                              number = 5,
+                              verboseIter = TRUE)
+
+#practice.weights <- runif(length(weight.sample.train))
+### nrounds =2000 with eta = 0.05
+weight.sample.train.norm <- weight.sample.train / sum(weight.sample.train)
+#Use caret to tune
+xgb_tuned.full.29 <- caret::train(
+  method = "xgbTree",
+  x= makeX(office_train),
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.29,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+#xgb_tuned.full.resampled.no.weights.29$call
+```
+
+```{r}
+
+#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.12.10.Rda"
+save(xgb_tuned.full.29,file=file.xgb_tuned.full)
+
+#load(file=file.xgb_tuned.full)
+#xgb_tuned <- xgb_tuned.25
+```
+
+
+```{r}
+
+
+```
+
+
+```{r}
+#xgb.model.full <- xgb_tuned.full.29
+office_train.makeX <- makeX(office_train)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+
+
+office_test.makeX <- makeX(office_test)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+
+
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+dtest <- xgb.DMatrix(data = office_test.makeX, label = label.test)
+
+xgb.model.full<- xgboost::xgb.train(params=xgb_tuned.full.29$bestTune %>% flatten(),dtrain,nrounds=2000)
+
+sum(colnames(dtrain) %in% colnames(dtest))
+sum(colnames(dtrain)==colnames(dtest))
+colnames(dtrain)[!colnames(dtrain) %in% colnames(dtest)]
+colnames(dtest)[!colnames(dtrain) %in% colnames(dtest)]
+colnames(dtest)[!colnames(dtest) %in% colnames(dtrain)]
+colnames(dtest)[!colnames(dtest) %in% xgb.model.full$feature_names]
+
+office_test$Pred.Full <- predict(xgb.model.full,dtest)
+
+
+
+xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full)
+
+```
+
+```{r}
+colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+
+```
+
+
+```{r}
+
+
+Var.Clinic = c("Age","Gender","pulse","SBP","DBP","Height.Stand","Weight","Waist.Circ","Arm.Circ","reg.iregg")
+Var.Hx = c("BP.Ever.Told.High","pdm.told","Sleep.Hours","dm.test.3yrs","Ever.Told.Overweight","TransfusionEver","Sleep.Ever.Told.Poor","dm.told","dm.told.ever","relative.asthma","Told.Asthma","Anemia.Treatment")
+Var.CBC = c("Seg.Neut.perc","Lymph.Perc","mcv","Monocyte.perc","eosin.perc","plt","Mean.Cell.Hemoglobin","mpv","rbc","hg","MCHC","Baso.Perc","wbc","RBC.Dist.Width")
+Var.CMP = c("na","potas","chlor","bicarb","bun","cr","cal","tprot","tbili","alb","ast","alt","alp","a1c")
+
+Var.Urine = c("u.alb", "u.cr")
+Var.Other.1 = c("ggt","phos","choles","HepB.sAb","HepB.cAb")
+Var.Other.2 = c("Globulin","ldh","urica","Hydroxycontine","Hep.A","Osmolality")
+Var.SDOH = c("Poverty.Ratio","RaceEth","Num.People.Household","Marriage.Status","LANG","CitizenStatus","EduLevel")
+
+Var.fasting = c("iron",'fpg','tgy','insulin')
+
+Var.Other.3 <- c("ggt","phos","u.alb", "u.cr","choles","HepB.sAb","HepB.cAb")
+
+### BASE: Clinic + Hx CBC + CMP + Hx
+### + Fasting
+### + Urine + Var.Other.1+ Var.Other.2 vs  + SDOH
+### Full
+
+
+
+```
+
+
+
+```{r}
+library(Gmisc)
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,show_all_values=TRUE,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Clinic,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Hx,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.CBC,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.CMP,Var.fasting,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.SDOH,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Urine,Var.Other.1,Var.Other.2,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+```
+
+
+
+```{r}
+tune_grid.mod <<- expand.grid(
+  nrounds = c(1500,2000),
+  eta = c(0.01,0.05),
+  max_depth = c(6,8),
+  subsample = c(0.6,0.8),
+  colsample_bytree = c(0.6,0.8),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+) 
+
+train_control <- trainControl(method = "cv", 
+                              number = 5,
+                              verboseIter = TRUE)
+
+
+office_test$two <- label.test
+#office_test$Pred.Full <- predict(xgb.model.full,dtest)
+
+
+#office_train %>% select(all_of(Var.fasting))
+office_train.Base <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
+office_train.makeX <- makeX(office_train.Base)
+dtrain <- xgb.DMatrix(data = makeX(office_train.Base), label = label.train)
+
+
+office_test.Base <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
+
+office_test.makeX <-  makeX(office_test.Base)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+#Use caret to tune
+xgb_tuned.Base <- caret::train(
+  method = "xgbTree",
+  x= makeX(office_train.Base),
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+xgb.model.Base<- xgboost::xgb.train(params=xgb_tuned.Base$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Base <- predict(xgb.model.Base,dtest)
+
+
+### FASTING
+office_train.Fasting <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
+
+office_train.makeX <- makeX(office_train.Fasting)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+
+office_test.Fasting <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
+
+
+office_test.makeX <-  makeX(office_test.Fasting)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+
+xgb_tuned.Fasting <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.Fasting<- xgboost::xgb.train(params=xgb_tuned.Fasting$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Fasting <- predict(xgb.model.Fasting,dtest)
+
+
+### URINE
+office_train.Urine <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+
+office_train.makeX <- makeX(office_train.Fasting)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+
+office_test.Urine <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+
+
+office_test.makeX <-  makeX(office_test.Urine)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+xgb_tuned.Urine <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.Urine.Var<- xgboost::xgb.train(params=xgb_tuned.Urine$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Urine.Var <- predict(xgb.model.Urine.Var,dtest)
+
+
+
+### SDOH
+office_train.SDOH <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH)))
+office_train.makeX <- makeX(office_train.SDOH)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+dtrain <- xgb.DMatrix(data = makeX(office_train.SDOH), label = label.train)
+
+
+
+office_test.makeX <-  makeX(office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH))))
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+xgb_tuned.SDOH <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+xgb.model.SDOH<- xgboost::xgb.train(params=xgb_tuned.SDOH$bestTune %>% flatten(),dtrain,nrounds=2000)
+
+xgb.model.SDOH$feature_names[!xgb.model.SDOH$feature_names %in% colnames(dtest)]
+
+office_test$Pred.SDOH <- predict(xgb.model.SDOH,dtest)
+
+
+
+
+### VAR 2 --- this is now a mini version of Full based on the results from Full
+
+office_train.Var2 <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+
+office_train.makeX <- makeX(office_train.Var2)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+office_test.Var2 <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+
+office_test.makeX <-  makeX(office_test.Var2)
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+xgb_tuned.Var2 <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.Var2<- xgboost::xgb.train(params=xgb_tuned.Var2$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.Var2 <- predict(xgb.model.Var2,dtest)
+
+
+
+### FIB-4
+office_train.FIB4 <- office_train %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+
+office_train.makeX <- makeX(office_train.FIB4)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+
+office_test.FIB4 <- office_test %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+
+
+
+office_test.makeX <-  makeX(office_test.FIB4)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+
+xgb_tuned.FIB4 <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.FIB4<- xgboost::xgb.train(params=xgb_tuned.FIB4$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
+
+
+office_train$two <- label.train
+office_train$sample.ogtt.weight <-  weight.sample.train
+
+
+office_test$two <- label.test
+office_test$sample.ogtt.weight <-  weight.sample.test
+
+### This is a Rda of the office_test data frame 
+#file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2024.11.22.Rda'
+save(office_train,file=file.office.train)
+
+### This is a Rda of the office_test data frame 
+
+#file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2024.11.22.Rda'
+save(office_test,file=file.office.test)
+
+### This is a list of all the models in question
+list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2)
+
+#file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb.models"
+save(list.models,file=file.list.models)
+
+#office_test$Pred.26 <- predict(xgb.model.26,dtest)
+```
+
+
+```{r}
+ggplot(office_test) + geom_point(aes(x=two,y=Pred.Full)) +
+  geom_point(aes(x=two,y=Pred.Base),color='red') +  
+  geom_point(aes(x=two,y=Pred.SDOH),color='green') +
+  geom_point(aes(x=two,y=Pred.Fasting),color='blue') +
+  geom_point(aes(x=two,y=Pred.Urine.Var),color='pink') +
+  geom_point(aes(x=two,y=Pred.Var2),color='cyan') +
+  geom_abline(aes(intercept=0,slope=1)) +
+  geom_vline(aes(xintercept=140),color='red') + 
+  geom_vline(aes(xintercept=200),color='red') + 
+  geom_hline(aes(yintercept=140),color='red') + 
+  geom_hline(aes(yintercept=200),color='red') 
+
+
+
+ggplot(office_test) + geom_point(aes(x=two,y=Pred.Full-Pred.Var2)) +
+  #geom_point(aes(x=two,y=Pred.Base),color='red') +  
+  #geom_point(aes(x=two,y=Pred.SDOH),color='green') +
+  #geom_point(aes(x=two,y=Pred.Fasting),color='blue') +
+  #geom_point(aes(x=two,y=Pred.Urine.Var),color='pink') +
+  #geom_point(aes(x=two,y=Pred.Var2),color='cyan') +
+  geom_abline(aes(intercept=0,slope=1)) +
+  geom_vline(aes(xintercept=140),color='red') + 
+  geom_vline(aes(xintercept=200),color='red') + 
+  geom_hline(aes(yintercept=140),color='red') + 
+  geom_hline(aes(yintercept=200),color='red') 
+
+office_test %>% mutate(Diff = (Pred.Full-Pred.Var2)*sample.ogtt.weight/sum(sample.ogtt.weight)) %>% summarise(Diff.Mean = mean(Diff),Diff.SD=sd(Diff))
+
+```
+
+
+```{r}
+
+df.importance <-full_join(
+xgb.importance(feature_names = colnames(xgb.model.Base),model=xgb.model.Base) %>% select(Feature,Gain) %>% rename(Gain.Base=Gain),
+  full_join(
+    xgb.importance(feature_names = colnames(xgb.model.SDOH),model=xgb.model.SDOH) %>% select(Feature,Gain) %>% rename(Gain.SDOH=Gain),
+    full_join(xgb.importance(feature_names = colnames(xgb.model.Fasting),model=xgb.model.Fasting) %>% select(Feature,Gain) %>% rename(Gain.Fasting=Gain),
+      full_join(xgb.importance(feature_names = colnames(xgb.model.Urine.Var),model=xgb.model.Urine.Var) %>% select(Feature,Gain) %>% rename(Gain.UrineVar=Gain),
+                full_join(xgb.importance(feature_names = colnames(xgb.model.Var2),model=xgb.model.Var2) %>% select(Feature,Gain) %>% rename(Gain.Var2=Gain),
+                          xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% select(Feature,Gain) %>% rename(Gain.Full=Gain),
+                      ,join_by(Feature))                          
+                      ,join_by(Feature))
+                ,join_by(Feature))
+          ,join_by(Feature))
+    ,join_by(Feature))
+
+
+
+Var.Clinic.2 = c("Age","GenderFemale","GenderMale","pulse","SBP","DBP","Height.Stand","Weight","Waist.Circ","Arm.Circ",
+                 "reg.ireggRegular", "reg.ireggIrregular")
+Var.Hx.2 = c("BP.Ever.Told.HighYes","BP.Ever.Told.HighNo","BP.Ever.Told.HighDon't know",
+             "pdm.toldYes","pdm.toldNo","pdm.toldDon't know","pdm.toldRefused",
+             "Sleep.Hours",
+             "dm.test.3yrsYes","dm.test.3yrsNo","dm.test.3yrsRefused","dm.test.3yrsDon't know",
+             "Ever.Told.OverweightYes","Ever.Told.OverweightNo","Ever.Told.OverweightDon't know","Ever.Told.OverweightRefused",
+             "TransfusionEverYes","TransfusionEverNo","TransfusionEverDon't know",
+             "Sleep.Ever.Told.PoorYes","Sleep.Ever.Told.PoorNo","Sleep.Ever.Told.PoorDon't know",
+             "dm.toldYes","dm.toldNo","dm.toldBorderline","dm.toldDon't know",
+             "dm.told.everYes","dm.told.everNo","dm.told.everDon't know","dm.told.everRefused",
+             "relative.asthmaYes","relative.asthmaNo","relative.asthmaDon't know","relative.asthmaRefused",
+             "Told.AsthmaYes","Told.AsthmaNo","Told.AsthmaDon't know",
+             "Anemia.TreatmentYes","Anemia.TreatmentNo","Anemia.TreatmentDon't know") 
+
+Var.CBC.2 = c("Seg.Neut.perc","Lymph.Perc","mcv","Monocyte.perc","eosin.perc","plt","Mean.Cell.Hemoglobin","mpv","rbc","hg","MCHC","Baso.Perc","wbc","RBC.Dist.Width")
+
+Var.CMP.2 = c("na","potas","chlor","bicarb","bun","cr","cal","tprot","tbili","alb","ast","alt","alp","a1c")
+
+
+Var.Urine.2 = c("u.alb", "u.cr")
+Var.Other.1.2 = c("ggt","phos","choles","HepB.cAbNegative",
+                  "HepB.sAbPositive","HepB.sAbNegative",
+                  "HepB.cAbPositive")
+Var.Other.2.2 = c("urica","Hydroxycontine","Hydrocontine",
+                  "Hep.APositive","Hep.ANegative","Hep.AIndeterminate",
+                  "Osmolality","Globulin","ldh")
+Var.SDOH.2 = c("Poverty.Ratio",
+               "RaceEthNon-Hispanic Black","RaceEthOther Hispanic","RaceEthNon-Hispanic White","RaceEthMexican American","RaceEthOther Race - Including Multi-Racial",
+               "Num.People.Household",
+               "Marriage.StatusMarried","Marriage.StatusWidowed","Marriage.StatusLiving with partner","Marriage.StatusDivorced","Marriage.StatusSeparated","Marriage.StatusNever married","Marriage.StatusRefused","Marriage.StatusDon't know", 
+               "LANG",
+               "CitizenStatusCitizen by birth or naturalization","CitizenStatusNot a citizen of the US","CitizenStatusDon't know","CitizenStatusRefused",
+               "EduLevelCollege Graduate or above","EduLevelSome College or AA degree","EduLevelHigh School Grad/GED or Equivalent","EduLevelHigh School Grad/GED or equivalent","EduLevel9-11th Grade (Includes 12th grade with no diploma)","EduLevelLess Than 9th Grade","EduLevelRefused","EduLevelDon't know") 
+
+
+Var.fasting.2 = c('fpg','tgy','insulin',"iron")
+
+
+Var.Other.3.2 = c("u.alb", "u.cr","choles","ggt","phos",
+                  "HepB.cAbNegative",
+                  "HepB.sAbPositive","HepB.sAbNegative",
+                  "HepB.cAbPositive")
+
+### BASE: Clinic + Hx CBC + CMP + Hx
+### + SDOH
+### + Fasting
+### + Urine + Var.Other.1
+### + Var.Other.2
+
+var.vector <- c(rep("Clinic",length(Var.Clinic.2)),
+                rep("History",length(Var.Hx.2)), ### excluding Ever.Told.OverweightRefused,dm.told.ever$Refused
+                rep("CBC",length(Var.CBC.2)),
+                rep("CMP",length(Var.CMP.2)),
+                rep("SDOH History",length(Var.SDOH.2)),
+                rep("Fasting Labs",length(Var.fasting.2)),
+                rep("Urine",length(Var.Urine.2)),
+                rep("Various Labs #1",length(Var.Other.1.2)),
+                rep("Various Labs #2",length(Var.Other.2.2))  )
+
+var.features <- c(Var.Clinic.2,
+                  Var.Hx.2,
+                  Var.CBC.2,
+                  Var.CMP.2,
+                  Var.SDOH.2,
+                  Var.fasting.2,
+                  Var.Urine.2,
+                  Var.Other.1.2,
+                  Var.Other.2.2)
+
+lookup_df <- data.frame(X=var.vector,Y=var.features)
+#df.importance$Feature[!df.importance$Feature %in% var.features]
+
+#var.features.2<-var.features[var.features %in% df.importance$Feature]
+### STUCK HERE 11.22.2024
+
+df.importance %>% left_join(lookup_df,by=c("Feature"="Y")) %>% rename(Type=X) %>% relocate(Feature,Type) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% pivot_longer(names_to = 'Model',cols=c(Gain.Base,Gain.SDOH,Gain.Fasting,Gain.UrineVar,Gain.Full))
+
+
+df.importance %>% left_join(lookup_df,by=c("Feature"="Y")) %>% rename(Type=X) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% pivot_longer(names_to = 'Model',cols=c(Gain.Base,Gain.SDOH,Gain.Fasting,Gain.UrineVar,Gain.Full)) %>% ggplot() + geom_tile(aes(x=Model,y=Feature,fill=-log10(value)))
+
+df.importance  %>% left_join(lookup_df,by=c("Feature"="Y")) %>% rename(Type=X) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% mutate(across(where(is.numeric), round, 5)) %>% write.csv(file="~/Documents/NHANES15-16/Model-Importance_2024.10.30.csv",row.names = FALSE)
+```
+
+```{r}
+xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% select(Feature,Gain)
+```
+
+
+
+```{r}
+plot.import.Base<- xgb.importance(feature_names = colnames(xgb.model.Base),model=xgb.model.Base) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Base Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+plot.import.SDOH<- xgb.importance(feature_names = colnames(xgb.model.SDOH),model=xgb.model.SDOH) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - SDOH Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+plot.import.Fasting<- xgb.importance(feature_names = colnames(xgb.model.Fasting),model=xgb.model.Fasting) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Fasting Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+plot.import.Urine.Var<- xgb.importance(feature_names = colnames(xgb.model.Urine.Var),model=xgb.model.Urine.Var) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Urine + Various Labs #1 Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+plot.import.Var2<- xgb.importance(feature_names = colnames(xgb.model.Var2),model=xgb.model.Var2) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Various Labs #2 Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+plot.import.full<- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% head(20) %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Full Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+
+
+grid.arrange(ncol=2,nrow=3,plot.import.Base,plot.import.Fasting,plot.import.SDOH,plot.import.Urine.Var,plot.import.Var2,plot.import.full)
+
+## file.importance.plots = TAKETHIS
+ggsave(file=file.importance.plots,arrangeGrob(ncol=2,nrow=3,plot.import.Base,plot.import.Fasting,plot.import.SDOH,plot.import.Urine.Var,plot.import.Var2,plot.import.full))
+
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+x0 <- office_test$two
+x1 <- office_test$Pred.Base
+x2 <- office_test$Pred.SDOH
+x3 <- office_test$Pred.Fasting
+x4 <- office_test$Pred.Urine.Var
+x5 <- office_test$Pred.Var2
+x6 <- office_test$Pred.Full
+  
+x0.a1c <- office_test$a1c
+x0.igt <- as.factor(office_test$two>=140 & office_test$two<200)
+x0.pphg <- as.factor(office_test$two>=200)
+
+
+
+
+
+df.stats<- data.frame(      
+           "Pre-DM - Evaluation - A1c"= 
+             c(auc(AUC::sensitivity(x0.a1c,x0.igt)),
+               auc(AUC::specificity(x0.a1c,x0.igt)),
+               auc(AUC::roc(x0.a1c,x0.igt))),
+            "Pre-DM - Evaluation - Base"= 
+             c(auc(AUC::sensitivity(x1,x0.igt)),
+               auc(AUC::specificity(x1,x0.igt)),
+               auc(AUC::roc(x1,x0.igt))),
+
+           "Pre-DM - Evaluation - Fasting"= 
+             c(auc(AUC::sensitivity(x3,x0.igt)),
+               auc(AUC::specificity(x3,x0.igt)),
+               auc(AUC::roc(x3,x0.igt))),
+           "Pre-DM - Evaluation - SDOH"= 
+             c(auc(AUC::sensitivity(x2,x0.igt)),
+               auc(AUC::specificity(x2,x0.igt)),
+               auc(AUC::roc(x2,x0.igt))),           
+           "Pre-DM - Evaluation - Urine.Var"= 
+             c(auc(AUC::sensitivity(x4,x0.igt)),
+               auc(AUC::specificity(x4,x0.igt)),
+               auc(AUC::roc(x4,x0.igt))),
+           "Pre-DM - Evaluation - Var2"=
+             c(auc(AUC::sensitivity(x5,x0.igt)),
+               auc(AUC::specificity(x5,x0.igt)),
+               auc(AUC::roc(x5,x0.igt))),
+           "Pre-DM - Evaluation - Full"= 
+             c(auc(AUC::sensitivity(x6,x0.igt)),
+               auc(AUC::specificity(x6,x0.igt)),
+               auc(AUC::roc(x6,x0.igt))),
+           
+           "DM - Evaluation - A1c"= 
+             c(auc(AUC::sensitivity(x0.a1c,x0.pphg)),
+               auc(AUC::specificity(x0.a1c,x0.pphg)),
+               auc(AUC::roc(x0.a1c,x0.pphg))),
+            "DM - Evaluation - Base"= 
+             c(auc(AUC::sensitivity(x1,x0.pphg)),
+               auc(AUC::specificity(x1,x0.pphg)),
+               auc(AUC::roc(x1,x0.pphg))),
+
+           "DM - Evaluation - Fasting"= 
+             c(auc(AUC::sensitivity(x3,x0.pphg)),
+               auc(AUC::specificity(x3,x0.pphg)),
+               auc(AUC::roc(x3,x0.pphg))),
+           "DM - Evaluation - SDOH"= 
+             c(auc(AUC::sensitivity(x2,x0.pphg)),
+               auc(AUC::specificity(x2,x0.pphg)),
+               auc(AUC::roc(x2,x0.pphg))),           
+           "DM - Evaluation - Urine.Var"= 
+             c(auc(AUC::sensitivity(x4,x0.pphg)),
+               auc(AUC::specificity(x4,x0.pphg)),
+               auc(AUC::roc(x4,x0.pphg))),
+           "DM - Evaluation - Var2"=
+             c(auc(AUC::sensitivity(x5,x0.pphg)),
+               auc(AUC::specificity(x5,x0.pphg)),
+               auc(AUC::roc(x5,x0.pphg))),
+           "DM - Evaluation - Full"= 
+             c(auc(AUC::sensitivity(x6,x0.pphg)),
+               auc(AUC::specificity(x6,x0.pphg)),
+               auc(AUC::roc(x6,x0.pphg)))
+) %>% t()  %>% data.frame()
+
+
+```
+
+
+
+```{r}
+
+names(df.stats) <- c('Sensitivity','Specificity','AUROC')
+
+df.stats <- df.stats %>% round(3)
+
+rownames(df.stats) <- gsub("\\.\\.\\.",' - ', rownames(df.stats) )
+df.stats
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 0.7)),
+    colhead = list(fg_params=list(cex = 0.5)),
+    rowhead = list(fg_params=list(cex = 0.5)))
+
+df.stats.pdm.grob <- df.stats[1:7,] %>% tableGrob(theme=mytheme)
+df.stats.dm.grob <- df.stats[8:14,] %>% tableGrob(theme=mytheme)
+
+```
+
+
+
+
+```{r}
+
+x0.pdm.roc <- tidy(AUC::roc(x0.a1c,x0.igt))
+x1.pdm.roc <- tidy(AUC::roc(x1,x0.igt))
+x2.pdm.roc <- tidy(AUC::roc(x2,x0.igt))
+x3.pdm.roc <- tidy(AUC::roc(x3,x0.igt))
+x4.pdm.roc <- tidy(AUC::roc(x4,x0.igt))
+x5.pdm.roc <- tidy(AUC::roc(x5,x0.igt))
+x6.pdm.roc <- tidy(AUC::roc(x6,x0.igt))
+
+x0.dm.roc <- tidy(AUC::roc(x0.a1c,x0.pphg))
+x1.dm.roc <- tidy(AUC::roc(x1,x0.pphg))
+x2.dm.roc <- tidy(AUC::roc(x2,x0.pphg))
+x3.dm.roc <- tidy(AUC::roc(x3,x0.pphg))
+x4.dm.roc <- tidy(AUC::roc(x4,x0.pphg))
+x5.dm.roc <- tidy(AUC::roc(x5,x0.pphg))
+x6.dm.roc <- tidy(AUC::roc(x6,x0.pphg))
+
+alpha.scale = 0.7
+plot.roc.eval.pdm <- ggplot() + ggtitle("Pre-Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.pdm.roc %>% filter(cutoff==5.7), aes(fpr, tpr,color="A1c",size="5.7"),alpha=alpha.scale) + 
+  geom_line(data=x0.pdm.roc, aes(fpr, tpr,color="A1c"),alpha=alpha.scale) + 
+  geom_line(data=x1.pdm.roc, aes(fpr, tpr,color="Base"),alpha=alpha.scale) + 
+  geom_line(data=x3.pdm.roc, aes(fpr, tpr,color="Fasting"),alpha=alpha.scale) + 
+  geom_line(data=x2.pdm.roc, aes(fpr, tpr,color="SDOH"),alpha=alpha.scale) + 
+  geom_line(data=x4.pdm.roc, aes(fpr, tpr,color="UrineVar"),alpha=alpha.scale) + 
+  geom_line(data=x5.pdm.roc, aes(fpr, tpr,color="Var.2"),alpha=alpha.scale) + 
+  geom_line(data=x6.pdm.roc, aes(fpr, tpr,color="Full"),alpha=alpha.scale) + 
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") + annotation_custom(df.stats.pdm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4) 
+  
+plot.roc.eval.dm <-ggplot() + ggtitle("Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.dm.roc %>% filter(cutoff>6.4), aes(fpr, tpr,color="A1c",size="6.4"),alpha=alpha.scale) + 
+  geom_line(data=x0.dm.roc, aes(fpr, tpr,color="A1c",),alpha=alpha.scale) + 
+  geom_line(data=x1.dm.roc, aes(fpr, tpr,color="Base",),alpha=alpha.scale) +
+  geom_line(data=x3.dm.roc, aes(fpr, tpr,color="Fasting",),alpha=alpha.scale) +
+  geom_line(data=x2.dm.roc, aes(fpr, tpr,color="SDOH",),alpha=alpha.scale) +
+  geom_line(data=x4.dm.roc, aes(fpr, tpr,color="UrineVar",),alpha=alpha.scale) +
+  geom_line(data=x5.dm.roc, aes(fpr, tpr,color="Var.2",),alpha=alpha.scale) +
+  geom_line(data=x6.dm.roc, aes(fpr, tpr,color="Full",),alpha=alpha.scale) +
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") +  annotation_custom(df.stats.dm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4)     
+
+grid.arrange(ncol=2,plot.roc.eval.pdm,plot.roc.eval.dm)
+## file.ROCs="TAKETHIS" 
+
+ggsave(file=file.ROCs,arrangeGrob(ncol=2,plot.roc.eval.pdm,plot.roc.eval.dm))
+```
+
+
+
+```{r DCA Plots - Evaluation ,  echo=FALSE, include=TRUE}
+library(dcurves)
+office_test$sample.ogtt.weight <- weight.sample.test
+
+# x0 <- office_test$two
+# x1 <- office_test$Pred.Base
+# x2 <- office_test$Pred.SDOH
+# x3 <- office_test$Pred.Fasting
+# x4 <- office_test$Pred.Urine.Var
+# x5 <- office_test$Pred.Var2
+# x6 <- office_test$Pred.Full
+  
+x0.a1c <- office_test$a1c
+x0.igt <- as.factor(office_test$two>=140 & office_test$two<200)
+x0.pphg <- as.factor(office_test$two>=200)
+
+
+df.dca.eval <- office_test %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+
+# Pre-Diabetes
+### bm = binom.model
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.x1 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Base)#, weights = sample.ogtt.weight)
+bm.pdm.x2 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.SDOH)#, weights = sample.ogtt.weight)
+bm.pdm.x3 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Fasting)#, weights = sample.ogtt.weight)
+bm.pdm.x4 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Urine.Var)#, weights = sample.ogtt.weight)
+bm.pdm.x5 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Var2)#, weights = sample.ogtt.weight)
+bm.pdm.x6 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.Full)#, weights = sample.ogtt.weight)
+bm.pdm.x7 <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.FIB4)#, weights = sample.ogtt.weight)
+
+
+## pm = pred.model
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x1 = broom::augment(bm.pdm.x1, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x2 = broom::augment(bm.pdm.x2, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x3 = broom::augment(bm.pdm.x3, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x4 = broom::augment(bm.pdm.x4, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x5 = broom::augment(bm.pdm.x5, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x6 = broom::augment(bm.pdm.x6, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.pdm.x7 = broom::augment(bm.pdm.x7, type.predict="response") %>% pull(".fitted"))   
+  
+
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 + pm.pdm.x4 + pm.pdm.x5 +  pm.pdm.x6 + pm.pdm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+  
+
+
+# Diabetes
+### bm = binom.model
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.x1 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Base)#, weights = sample.ogtt.weight)
+bm.dm.x2 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.SDOH)#, weights = sample.ogtt.weight)
+bm.dm.x3 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Fasting)#, weights = sample.ogtt.weight)
+bm.dm.x4 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Urine.Var)#, weights = sample.ogtt.weight)
+bm.dm.x5 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Var2)#, weights = sample.ogtt.weight)
+bm.dm.x6 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.Full)#, weights = sample.ogtt.weight)
+bm.dm.x7 <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.FIB4)#, weights = sample.ogtt.weight)
+
+
+## pm = pred.model
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x1 = broom::augment(bm.dm.x1, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x2 = broom::augment(bm.dm.x2, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x3 = broom::augment(bm.dm.x3, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x4 = broom::augment(bm.dm.x4, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x5 = broom::augment(bm.dm.x5, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x6 = broom::augment(bm.dm.x6, type.predict="response") %>% pull(".fitted")) %>% 
+  mutate(pm.dm.x7 = broom::augment(bm.dm.x7, type.predict="response") %>% pull(".fitted"))   
+  
+
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x1 + pm.pdm.x2 + pm.pdm.x3 + pm.pdm.x4 + pm.pdm.x5 +  pm.pdm.x6 + pm.pdm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c + pm.dm.x1 + pm.dm.x2 + pm.dm.x3 + pm.dm.x4 + pm.dm.x5 + pm.dm.x6 + pm.dm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Var2",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
+
+
+
+
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
+
+## file.dca.all = "TAKETHIS"
+ggsave(file=file.dca.all,arrangeGrob(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm))
+```
+
+
+
+
+
+
+```{r DCA plots, Full}
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c   + pm.pdm.x5 +  pm.pdm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c   + pm.dm.x5 +  pm.dm.x7 ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Var2",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
+
+
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
+
+## file.dca.fib4 = "TAKETHIS"
+ggsave(file=file.dca.fib4,arrangeGrob(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm))
+```
+
+
+```{r DCA plots, Minimal }
+
+
+
+x0.pdm.roc <- tidy(AUC::roc(x0.a1c,x0.igt))
+x1.pdm.roc <- tidy(AUC::roc(x1,x0.igt))
+x2.pdm.roc <- tidy(AUC::roc(x2,x0.igt))
+x3.pdm.roc <- tidy(AUC::roc(x3,x0.igt))
+x4.pdm.roc <- tidy(AUC::roc(x4,x0.igt))
+x5.pdm.roc <- tidy(AUC::roc(x5,x0.igt))
+x6.pdm.roc <- tidy(AUC::roc(x6,x0.igt))
+
+x0.dm.roc <- tidy(AUC::roc(x0.a1c,x0.pphg))
+x1.dm.roc <- tidy(AUC::roc(x1,x0.pphg))
+x2.dm.roc <- tidy(AUC::roc(x2,x0.pphg))
+x3.dm.roc <- tidy(AUC::roc(x3,x0.pphg))
+x4.dm.roc <- tidy(AUC::roc(x4,x0.pphg))
+x5.dm.roc <- tidy(AUC::roc(x5,x0.pphg))
+x6.dm.roc <- tidy(AUC::roc(x6,x0.pphg))
+
+alpha.scale = 0.7
+plot.roc.eval.pdm <- ggplot() + ggtitle("Pre-Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.pdm.roc %>% filter(cutoff==5.7), aes(fpr, tpr,color="A1c",size="5.7"),alpha=alpha.scale) + 
+  geom_line(data=x0.pdm.roc, aes(fpr, tpr,color="A1c"),alpha=alpha.scale) + 
+  geom_line(data=x1.pdm.roc, aes(fpr, tpr,color="Base"),alpha=alpha.scale) + 
+  geom_line(data=x3.pdm.roc, aes(fpr, tpr,color="Fasting"),alpha=alpha.scale) + 
+  #geom_line(data=x2.pdm.roc, aes(fpr, tpr,color="SDOH"),alpha=alpha.scale) + 
+  #geom_line(data=x4.pdm.roc, aes(fpr, tpr,color="UrineVar"),alpha=alpha.scale) + 
+  geom_line(data=x5.pdm.roc, aes(fpr, tpr,color="Var.2"),alpha=alpha.scale) + 
+  #geom_line(data=x6.pdm.roc, aes(fpr, tpr,color="Full"),alpha=alpha.scale) + 
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") + annotation_custom(df.stats.pdm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4) 
+  
+plot.roc.eval.dm <-ggplot() + ggtitle("Diabetes - Evaluation Data - ROCs") + 
+  geom_point(data=x0.dm.roc %>% filter(cutoff==6.4), aes(fpr, tpr,color="A1c",size="6.4"),alpha=alpha.scale) + 
+  geom_line(data=x0.dm.roc, aes(fpr, tpr,color="A1c",),alpha=alpha.scale) + 
+  geom_line(data=x1.dm.roc, aes(fpr, tpr,color="Base",),alpha=alpha.scale) +
+  geom_line(data=x3.dm.roc, aes(fpr, tpr,color="Fasting",),alpha=alpha.scale) +
+  #geom_line(data=x2.dm.roc, aes(fpr, tpr,color="SDOH",),alpha=alpha.scale) +
+  #geom_line(data=x4.dm.roc, aes(fpr, tpr,color="UrineVar",),alpha=alpha.scale) +
+  geom_line(data=x5.dm.roc, aes(fpr, tpr,color="Var.2",),alpha=alpha.scale) +
+  #geom_line(data=x6.dm.roc, aes(fpr, tpr,color="Full",),alpha=alpha.scale) +
+  labs(color="Data",size="A1c Threshold") + xlab('False Positive Rate') + ylab('True Positive Rate')  + theme(plot.title = element_text(hjust = 0.5)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") +  annotation_custom(df.stats.dm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4)     
+
+grid.arrange(ncol=2,plot.roc.eval.pdm,plot.roc.eval.dm)
+
+plot.dca.eval.pdm <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.x3   + pm.pdm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.x1 = "Base",
+  pm.pdm.x3 = "Fasting",
+  pm.pdm.x2 = "SDOH",  
+  pm.pdm.x4 = "UrineVar",
+  pm.pdm.x5 = "Var2",
+  pm.pdm.x6 = "Full",
+  pm.pdm.x7 = "FIB4"  
+)) %>%
+  plot(smooth = TRUE) + ggtitle('Evaluation Data - Pre-Diabetes')
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c  + pm.dm.x3 + pm.dm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Var2",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Data - Diabetes')
+
+
+grid.arrange(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm) %>% suppressWarnings()
+
+## file.dca.min = "TAKETHIS"
+ggsave(file=file.dca.min,arrangeGrob(nrow=2,plot.dca.eval.pdm,plot.dca.eval.dm))
+
+
+```
+
+
+```{r For Significance Section}
+fn.dist.plot <-df %>% drop_na(a1c,two) %>%  mutate(A1c = if_else(a1c<5.7,"A1c < 5.7",if_else(a1c>=5.7 & a1c<6.5,"5.7 ≤ A1c < 6.5","A1c ≥ 6.5")), TWO=if_else(two>=200, "Diabetes\nby 2-hour\nGlucose\n","No Diabetes\nby 2-hour\nGlucose"))  %>% mutate(A1c = factor(A1c,levels=c("A1c < 5.7","5.7 ≤ A1c < 6.5","A1c ≥ 6.5"))) %>% ggplot() + geom_jitter(aes(x=A1c,y=two,color=TWO)) + labs(title="NHANES\n2005-2016 Data",color="Diagnosis",tag="A") + xlab("Hemoglobin A1c (%)") + ylab("Two-hour Glucose from OGTT") + scale_x_discrete(labels=c("A1c < 5.7","\n5.7 ≤ A1c < 6.5","A1c ≥ 6.5"))  + 
+      theme(axis.text=element_text(size=15),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=18),
+            plot.title = element_text(hjust = 0.5,size=20)
+            )
+
+
+
+scale_color_Sig <- function(...){
+    ggplot2:::manual_scale(
+        'color', 
+        values = setNames(c('brown','orange','red', 'blue', 'purple'), c("Treat All","Treat None","A1c","Fasting","Additional\nLabs")), 
+        ...
+    )
+}
+
+alpha.scale=1
+plot.roc.eval.dm <-ggplot() + ggtitle("Evaluation Model ROCs\nfor Diabetes Diagnosis") + 
+  #geom_point(data=x0.dm.roc %>% filter(cutoff==6.4), aes(fpr, tpr,color="A1c",size="6.4"),alpha=alpha.scale) + 
+  geom_line(data=x0.dm.roc, aes(fpr, tpr,color="A1c",),alpha=alpha.scale,linewidth=1) + 
+  #geom_line(data=x1.dm.roc, aes(fpr, tpr,color="Base",),alpha=alpha.scale) +
+  geom_line(data=x3.dm.roc, aes(fpr, tpr,color="Fasting",),alpha=alpha.scale,linewidth=1) +
+  #geom_line(data=x2.dm.roc, aes(fpr, tpr,color="SDOH",),alpha=alpha.scale) +
+  #geom_line(data=x4.dm.roc, aes(fpr, tpr,color="UrineVar",),alpha=alpha.scale) +
+  geom_line(data=x5.dm.roc, aes(fpr, tpr,color="Additional\nLabs",),alpha=alpha.scale,linewidth=1) +
+  #geom_line(data=x6.dm.roc, aes(fpr, tpr,color="Full",),alpha=alpha.scale) +
+  labs(color="Data",size="A1c Threshold",tag="B") + xlab('False Positive Rate') + ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5,size=20)) + geom_line(aes(c(0,1),c(0,1)),linetype="dashed") +  #annotation_custom(df.stats.dm.grob,xmin=0.4,xmax=1,ymin=0,ymax=0.4)     + 
+  theme(plot.tag.position = c(0.0, 0.98))  + scale_color_Sig() + 
+      theme(axis.text=element_text(size=15),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=18)
+            )
+
+
+
+plot.dca.eval.dm <- dca(DM ~ pm.dm.a1c  + pm.dm.x3 + pm.dm.x5  ,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.x1 = "Base",
+  pm.dm.x3 = "Fasting",
+  pm.dm.x2 = "SDOH",
+  pm.dm.x4 = "UrineVar",
+  pm.dm.x5 = "Additional\nLabs",
+  pm.dm.x6 = "Full",
+  pm.dm.x7 = "FIB4"
+)) %>% 
+  plot(smooth = TRUE)  + ggtitle('Evaluation Decision Curves\nfor Diabetes Diagnosis') + labs(tag="C") + scale_color_Sig() + 
+  theme_gray() + 
+      theme(axis.text=element_text(size=15),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=18),
+            plot.title = element_text(hjust = 0.5,size=20)
+            ) 
+
+
+
+grid.arrange(ncol=3,fn.dist.plot,plot.roc.eval.dm,plot.dca.eval.dm) %>% suppressWarnings()
+
+## file.dca.min = "TAKETHIS"
+#ggsave(file=file.dca.min,arrangeGrob(nrow=3,fn.dist.plot,plot.roc.eval.dm,plot.dca.eval.dm))
+
+
+```
+
+
+```{r }
+### Trying with predefined cutoffs
+
+x0.pdm <- as.factor(x0.a1c >=5.7 & x0.a1c<6.5)
+x1.pdm <- as.factor(x1 >= 140 & x1 < 200)
+x2.pdm <- as.factor(x2 >= 140 & x2 < 200)
+x3.pdm <- as.factor(x3 >= 140 & x3 < 200)
+x4.pdm <- as.factor(x4 >= 140 & x4 < 200)
+x5.pdm <- as.factor(x5 >= 140 & x5 < 200)
+x6.pdm <- as.factor(x6 >= 140 & x6 < 200)
+
+x0.dm <- as.factor(x0.a1c >=6.5)
+x1.dm <- as.factor(x1 >= 200)
+x2.dm <- as.factor(x2 >= 200)
+x3.dm <- as.factor(x3 >= 200)
+x4.dm <- as.factor(x4 >= 200)
+x5.dm <- as.factor(x5 >= 200)
+x6.dm <- as.factor(x6 >= 200)
+
+
+df.stats.alt <- data.frame(      
+           "Pre-DM - Evaluation - A1c"= 
+             c(auc(AUC::sensitivity(x0.pdm,x0.igt)),
+               auc(AUC::specificity(x0.pdm,x0.igt)),
+               auc(AUC::roc(x0.a1c,x0.igt))),
+            "Pre-DM - Evaluation - Base"= 
+             c(auc(AUC::sensitivity(x1.pdm,x0.igt)),
+               auc(AUC::specificity(x1.pdm,x0.igt)),
+               auc(AUC::roc(x1,x0.igt))),
+           "Pre-DM - Evaluation - Fasting"= 
+             c(auc(AUC::sensitivity(x3.pdm,x0.igt)),
+               auc(AUC::specificity(x3.pdm,x0.igt)),
+               auc(AUC::roc(x3,x0.igt))),
+           "Pre-DM - Evaluation - SDOH"= 
+             c(auc(AUC::sensitivity(x2.pdm,x0.igt)),
+               auc(AUC::specificity(x2.pdm,x0.igt)),
+               auc(AUC::roc(x2,x0.igt))),           
+           "Pre-DM - Evaluation - Urine.Var"= 
+             c(auc(AUC::sensitivity(x4.pdm,x0.igt)),
+               auc(AUC::specificity(x4.pdm,x0.igt)),
+               auc(AUC::roc(x4,x0.igt))),
+           "Pre-DM - Evaluation - Var2"=
+             c(auc(AUC::sensitivity(x5.pdm,x0.igt)),
+               auc(AUC::specificity(x5.pdm,x0.igt)),
+               auc(AUC::roc(x5,x0.igt))),
+           "Pre-DM - Evaluation - Full"= 
+             c(auc(AUC::sensitivity(x6.pdm,x0.igt)),
+               auc(AUC::specificity(x6.pdm,x0.igt)),
+               auc(AUC::roc(x6,x0.igt))),
+           
+           "DM - Evaluation - A1c"= 
+             c(auc(AUC::sensitivity(x0.dm,x0.pphg)),
+               auc(AUC::specificity(x0.dm,x0.pphg)),
+               auc(AUC::roc(x0.a1c,x0.pphg))),
+            "DM - Evaluation - Base"= 
+             c(auc(AUC::sensitivity(x1.dm,x0.pphg)),
+               auc(AUC::specificity(x1.dm,x0.pphg)),
+               auc(AUC::roc(x1,x0.pphg))),
+           "DM - Evaluation - Fasting"= 
+             c(auc(AUC::sensitivity(x3.dm,x0.pphg)),
+               auc(AUC::specificity(x3.dm,x0.pphg)),
+               auc(AUC::roc(x3,x0.pphg))),
+           "DM - Evaluation - SDOH"= 
+             c(auc(AUC::sensitivity(x2.dm,x0.pphg)),
+               auc(AUC::specificity(x2.dm,x0.pphg)),
+               auc(AUC::roc(x2,x0.pphg))),           
+           "DM - Evaluation - Urine.Var"= 
+             c(auc(AUC::sensitivity(x4.dm,x0.pphg)),
+               auc(AUC::specificity(x4.dm,x0.pphg)),
+               auc(AUC::roc(x4,x0.pphg))),
+           "DM - Evaluation - Var2"=
+             c(auc(AUC::sensitivity(x5.dm,x0.pphg)),
+               auc(AUC::specificity(x5.dm,x0.pphg)),
+               auc(AUC::roc(x5,x0.pphg))),
+           "DM - Evaluation - Full"= 
+             c(auc(AUC::sensitivity(x6.dm,x0.pphg)),
+               auc(AUC::specificity(x6.dm,x0.pphg)),
+               auc(AUC::roc(x6,x0.pphg)))
+) %>% t()  %>% data.frame()
+
+
+df.stats.alt
+names(df.stats.alt) <- c('Sensitivity','Specificity','AUROC')
+
+df.stats.alt <- df.stats.alt %>% round(3)
+
+rownames(df.stats.alt) <- gsub("\\.\\.\\.",' - ', rownames(df.stats.alt) )
+df.stats.alt
+
+
+full_join(df.stats %>% rownames_to_column(),df.stats.alt %>% rownames_to_column(),join_by(rowname))
+
+```
+
+```{r}
+office_test$PDM <- as.factor(office_test$two >= 140 & office_test$two < 200)
+office_test$DM <- as.factor(office_test$two >= 200)
+
+#office_test %>% mutate(PreDM = (two>140 & two <=200)) %>%  pROC::roc_(predictor="a1c",response="PreDM") %>% coords("best")
+
+
+```
+
+
+```{r}
+
+
+
+
+f.pROC.cutoff <- function(x,predictor.x,response.x) 
+pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best")["threshold"] 
+
+f.pROC.spe <- function(x,predictor.x,response.x)  pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best",ret="specificity")
+
+f.pROC.sen <- function(x,predictor.x,response.x)  pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best",ret="sensitivity")
+
+f.pROC.acc <- function(x,predictor.x,response.x)  pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best",ret="accuracy")
+
+f.pROC.prec <- function(x,predictor.x,response.x)  pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best",ret="precision") 
+
+
+f.pROC.auc <- function(x,predictor.x,response.x)  pROC::auc(pROC::roc_(data=x,predictor=predictor.x,response=response.x),partial.auc=FALSE)
+
+
+#pROC::coords(pROC::roc_(data=x,predictor=y,response=z),ret=c("threshold", "sensitivity","specificity", "accuracy","precision"),"best")
+
+#f.pROC.prec(x,y,z)
+
+f.df.stat <- function(x,y,z) data.frame(
+  "Type" = "best",
+  "Rowname"=y,
+  "Diagnosis"=z,
+  "Cutoff"=f.pROC.cutoff(x,y,z),
+  "Specificity"=f.pROC.spe(x,y,z),
+  "Sensitivity"=f.pROC.sen(x,y,z),
+  "Accuracy"=f.pROC.acc(x,y,z),
+  "Precision"=f.pROC.prec(x,y,z),
+  "AUC"=f.pROC.auc(x,y,z) )
+
+
+x <- office_test; z <- "PDM"
+df.stat.2 <- f.df.stat(x,"a1c",z)
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Base",z))
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Fasting",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.SDOH",z))
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Urine.Var",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Var2",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Full",z)) 
+
+z <- "DM"
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"a1c",z))
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Base",z))
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Fasting",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.SDOH",z))
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Urine.Var",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Var2",z)) 
+df.stat.2 <- rbind(df.stat.2,f.df.stat(x,"Pred.Full",z)) 
+df.stat.2
+
+#a<- 5.7;y<-"a1c";z<-"DM"
+f.cutoff <- function(x,y,z,a) {
+  i<-which.min(abs(a-pROC::coords(pROC::roc_(data=x,predictor=y,response=z))["threshold"]) %>% flatten()) 
+  return(data.frame("Type"="manual","Rowname"=y,"Diagnosis"=z,pROC::coords(pROC::roc_(data=x,predictor=y,response=z),ret=c("threshold", "sensitivity","specificity", "accuracy","precision"))[i,],"AUC"=f.pROC.auc(x,y,z)))
+}
+#f.cutoff(office_test,"a1c","DM",5.7)
+
+x <- office_test; z <- "PDM"
+df.stat.manual <- f.cutoff(x,"a1c",z,5.7)
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Base",z,140))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Fasting",z,140))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.SDOH",z,140))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Urine.Var",z,140)) 
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Var2",z,140))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Full",z,140))
+
+z <- "DM"
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"a1c",z,6.5))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Base",z,200))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Fasting",z,200))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.SDOH",z,200))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Urine.Var",z,200))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Var2",z,200))
+df.stat.manual <- rbind(df.stat.manual,f.cutoff(x,"Pred.Full",z,200))
+df.stat.manual
+df.stat.2
+
+
+
+
+
+# %>% pAuc()# coords("best")# %>% ggplot() + geom_line(aes(x=1-specificity,y=sensitivity))
+```
+
+
+```{r}
+### Sensitivity = TPR
+### Specificity = 1 - FPR
+
+df.stat.2 %>% mutate() 
+
+
+office_test
+int.resample.df <- resample(seq(1,dim(df %>% drop_na(two,a1c,sample.ogtt.weight))[1]),probs=sample.ogtt.weight/sum(sample.ogtt.weight),size=10000)
+
+
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 0.6)),
+    colhead = list(fg_params=list(cex = 0.5)),
+    rowhead = list(fg_params=list(cex = 0.5)))
+
+df.stats.pdm.grob <- df.stats[1:7,] %>% tableGrob(theme=mytheme)
+df.stats.dm.grob <- df.stats[8:14,] %>% tableGrob(theme=mytheme)
+
+boxplot.table.stats<- df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) ) %>% group_by(a1c_group) %>% summarise(PreDM = round(sum(two>=140 & two < 200)/sum(two>0),2),DM = round(sum(two > 200)/sum(two>0),2))
+
+boxplot.table.stats.grob <- boxplot.table.stats[2:9,]  %>% tableGrob(theme=mytheme)
+
+set.seed(1234)
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) )  %>% ggplot(aes(x= a1c_group, y = two))   + geom_boxplot(alpha=0.9) + geom_hline(aes(yintercept=140),color='red')+ geom_hline(aes(yintercept=200),color='red') + xlab('A1c Range')+ ylab('2-hour Glucose') + annotation_custom(boxplot.table.stats.grob,xmin=0,xmax=3.5,ymin=250,ymax=490) 
+```
+
+```{r}
+# Load the required library
+library(ggplot2)
+
+# Assuming your data is in a dataframe called `data`
+# Columns: a1c_group (A1c bins), OGTT (2-hour glucose levels), diabetes_status (categorical variable: "no DM", "prediabetes", "diabetes")
+
+f.dm <- function(x){
+  if(x >=200){ y="diabetes" }else if (x < 200 & x >=140){y="prediabetes"} else {y="no DM"}
+  return(y)
+}
+
+# Create the dot plot
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% select(a1c,two,sample.ogtt.weight) %>% mutate(diabetes_status = sapply(two,f.dm)) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) )   %>% 
+  ggplot( aes(x = a1c_group, y = two, color = diabetes_status,fill= diabetes_status)) +
+  geom_dotplot(binaxis = "y",
+               stackdir = "center",
+               binwidth = 1,
+               dotsize = 0.2,
+               stackratio = 0.5) +
+  scale_fill_manual(values = c("no DM" = "blue", "prediabetes" = "green", "diabetes" = "maroon"))  +
+  scale_color_manual(values = c("no DM" = "blue", "prediabetes" = "green", "diabetes" = "maroon")) +
+  labs(title = "Distribution of OGTT Levels by A1c Bin",
+       x = "A1c Range",
+       y = "2-hour Glucose Levels",
+       fill = "Diabetes Status") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray", linetype = "dashed")
+  )
+
+
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% select(a1c,two,sample.ogtt.weight) %>% mutate(diabetes_status = sapply(two,f.dm)) %>% filter(a1c<10) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 8, 0.4)) )   %>% 
+  ggplot( aes(x = a1c_group, y = two, color = diabetes_status,fill= diabetes_status)) +
+  geom_dotplot(binaxis = "y",
+               stackdir = "center",
+               binwidth = 1,
+               dotsize = 0.2,
+               stackratio = 0.5) +
+  scale_fill_manual(values = c("no DM" = "blue", "prediabetes" = "green", "diabetes" = "maroon"))  +
+  scale_color_manual(values = c("no DM" = "blue", "prediabetes" = "green", "diabetes" = "maroon")) +
+  labs(title = "Distribution of OGTT Levels by A1c Bin",
+       x = "A1c Range",
+       y = "2-hour Glucose Levels",
+       fill = "Diabetes Status") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray", linetype = "dashed")
+  )
+
+```
+
+
+```{r}
+f.get.thresh <- function(r,s) df.stat.2[df.stat.2$Rowname==r & df.stat.2$Diagnosis==s,"threshold"]
+
+
+office_test[int.resample.test,] %>% 
+  mutate(A1c.PDM = a1c >= 5.7 & a1c < 6.5 ) %>%
+  mutate(Base.PDM = Pred.Base >= f.get.thresh("Pred.Base",s) & Pred.Base < f.get.thresh("Pred.Base","DM") )%>%
+  mutate(SDOH.PDM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)& Pred.SDOH < f.get.thresh("Pred.SDOH","DM") )%>%
+  mutate(Fasting.PDM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)& Pred.Fasting < f.get.thresh("Pred.Fasting","DM") )%>%
+  mutate(Urine.Var.PDM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)& Pred.Urine.Var < f.get.thresh("Pred.Urine.Var","DM") )%>%
+  mutate(Var2.PDM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)& Pred.Var2 < f.get.thresh("Pred.Var2","DM") )%>%
+  mutate(Full.PDM = Pred.Full >= f.get.thresh("Pred.Full",s)& Pred.Full < f.get.thresh("Pred.Full","DM") )%>% 
+  mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.4)) ) %>% 
+  group_by(a1c_group)  %>% 
+  summarise(A1c.PDM.Sum.TP = sum(A1c.PDM & two >= 140 & two < 200),
+            Base.PDM.Sum.TP = sum(Base.PDM & two >= 140 & two < 200),
+            Fasting.PDM.Sum.TP = sum(Fasting.PDM & two >= 140 & two < 200),
+            SDOH.PDM.Sum.TP = sum(SDOH.PDM & two >= 140 & two < 200),
+            UrineVar.PDM.Sum.TP = sum(Urine.Var.PDM & two >= 140 & two < 200),
+            Var2.PDM.Sum.TP = sum(Var2.PDM & two >= 140 & two < 200),
+            Full.PDM.Sum.TP = sum(Full.PDM & two >= 140 & two < 200),
+            
+            A1c.PDM.Sum.FP = sum(A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.FP = sum(Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.FP = sum(SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.FP = sum(Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.FP = sum(Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.FP = sum(Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.FP = sum(Full.PDM & (two < 140 | two >= 200)),
+            
+            A1c.PDM.Sum.FN = sum(!A1c.PDM & (two >= 140 & two < 200)),
+            Base.PDM.Sum.FN = sum(!Base.PDM & (two >= 140 & two < 200)),
+            SDOH.PDM.Sum.FN = sum(!SDOH.PDM & (two >= 140 & two < 200)),
+            Fasting.PDM.Sum.FN = sum(!Fasting.PDM & (two >= 140 & two < 200)),
+            UrineVar.PDM.Sum.FN = sum(!Urine.Var.PDM & (two >= 140 & two < 200)),
+            Var2.PDM.Sum.FN = sum(!Var2.PDM & (two >= 140 & two < 200)),
+            Full.PDM.Sum.FN = sum(!Full.PDM & (two >= 140 & two < 200)),            
+
+            A1c.PDM.Sum.TN = sum(!A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.TN = sum(!Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.TN = sum(!SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.TN = sum(!Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.TN = sum(!Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.TN = sum(!Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.TN = sum(!Full.PDM & (two < 140 | two >= 200)),            
+                        
+            ) %>% 
+  ungroup() %>% pivot_longer(-a1c_group,values_to = "Count") %>%
+    separate_wider_delim(name,".",names=c("Model","Diagnosis",NA,"Stat")) %>%
+    mutate(Model = factor(Model,levels=c("A1c","Base","Fasting","SDOH","UrineVar", "Full"))) %>% mutate(Percentage = Count / resample.size * 100)  %>% mutate(`A1c Group`= if_else(a1c_group=="(3.7,4.1]" | a1c_group=="(4.1,4.5]","(4.0,4.5]",a1c_group)) %>% group_by(`A1c Group`,Stat,Diagnosis,Model) %>% summarise(Count=sum(Count),Percentage=sum(Percentage))
+```
+
+
+
+```{r Pre-Diabetes TP, TN, FP, FN , A1c-group by 0.4%}
+resample.size <- 1000000
+int.resample.test <- resample(seq(1,dim(office_test)[1]),probs=weight.sample.test/sum(weight.sample.test),size=resample.size)
+
+f.get.thresh <- function(r,s) df.stat.2[df.stat.2$Rowname==r & df.stat.2$Diagnosis==s,"threshold"]
+
+
+
+r = 'Pred.Base';s='PDM'
+df.pdm.confusion.4 <- office_test[int.resample.test,] %>% filter(a1c < 5.7) %>% 
+  mutate(A1c.PDM = a1c >= 5.7 & a1c < 6.5 ) %>%
+  mutate(Base.PDM = Pred.Base >= f.get.thresh("Pred.Base",s) & Pred.Base < f.get.thresh("Pred.Base","DM") )%>%
+  mutate(SDOH.PDM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)& Pred.SDOH < f.get.thresh("Pred.SDOH","DM") )%>%
+  mutate(Fasting.PDM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)& Pred.Fasting < f.get.thresh("Pred.Fasting","DM") )%>%
+  mutate(Urine.Var.PDM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)& Pred.Urine.Var < f.get.thresh("Pred.Urine.Var","DM") )%>%
+  mutate(Var2.PDM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)& Pred.Var2 < f.get.thresh("Pred.Var2","DM") )%>%
+  mutate(Full.PDM = Pred.Full >= f.get.thresh("Pred.Full",s)& Pred.Full < f.get.thresh("Pred.Full","DM") )%>% 
+  mutate(a1c_group = cut(a1c, seq(3.3, 5.7, 0.4),right=FALSE) ) %>% 
+  group_by(a1c_group)  %>% 
+  summarise(A1c.PDM.Sum.TP = sum(A1c.PDM & two >= 140 & two < 200),
+            Base.PDM.Sum.TP = sum(Base.PDM & two >= 140 & two < 200),
+            Fasting.PDM.Sum.TP = sum(Fasting.PDM & two >= 140 & two < 200),
+            SDOH.PDM.Sum.TP = sum(SDOH.PDM & two >= 140 & two < 200),
+            UrineVar.PDM.Sum.TP = sum(Urine.Var.PDM & two >= 140 & two < 200),
+            Var2.PDM.Sum.TP = sum(Var2.PDM & two >= 140 & two < 200),
+            Full.PDM.Sum.TP = sum(Full.PDM & two >= 140 & two < 200),
+            
+            A1c.PDM.Sum.FP = sum(A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.FP = sum(Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.FP = sum(SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.FP = sum(Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.FP = sum(Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.FP = sum(Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.FP = sum(Full.PDM & (two < 140 | two >= 200)),
+            
+            A1c.PDM.Sum.FN = sum(!A1c.PDM & (two >= 140 & two < 200)),
+            Base.PDM.Sum.FN = sum(!Base.PDM & (two >= 140 & two < 200)),
+            SDOH.PDM.Sum.FN = sum(!SDOH.PDM & (two >= 140 & two < 200)),
+            Fasting.PDM.Sum.FN = sum(!Fasting.PDM & (two >= 140 & two < 200)),
+            UrineVar.PDM.Sum.FN = sum(!Urine.Var.PDM & (two >= 140 & two < 200)),
+            Var2.PDM.Sum.FN = sum(!Var2.PDM & (two >= 140 & two < 200)),
+            Full.PDM.Sum.FN = sum(!Full.PDM & (two >= 140 & two < 200)),            
+
+            A1c.PDM.Sum.TN = sum(!A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.TN = sum(!Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.TN = sum(!SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.TN = sum(!Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.TN = sum(!Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.TN = sum(!Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.TN = sum(!Full.PDM & (two < 140 | two >= 200)),            
+                        
+            ) %>% 
+  ungroup() %>% pivot_longer(-a1c_group,values_to = "Count") %>%
+    separate_wider_delim(name,".",names=c("Model","Diagnosis",NA,"Stat")) %>% mutate(Stat=paste0(Stat,'R')) %>% 
+    mutate(Model = factor(Model,levels=c("A1c","Base","Fasting","SDOH","UrineVar","Var2", "Full"))) %>% mutate(Percentage = Count / resample.size * 100)  %>% mutate(`A1c Group`= if_else(a1c_group=="[3.7,4.1)" | a1c_group=="[4.1,4.5)","[4.0,4.5)",a1c_group)) %>% group_by(`A1c Group`,Stat,Diagnosis,Model) %>% summarise(Count=sum(Count),Percentage=sum(Percentage))
+
+df.pdm.confusion.4
+
+grid.arrange(ncol=2,
+df.pdm.confusion.4 %>%  ggplot(aes(x=Model,y=Percentage,group=Stat,fill=Stat),alpha=0.5) + geom_col() + facet_wrap(~`A1c Group`,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5)) + labs(title="Pre-Diabetes Diagnosis",subtitle="Plots separated by A1c range",fill="Statistic") ,
+
+
+df.pdm.confusion.4 %>%   ggplot(aes(x=`A1c Group`,y=Percentage,group=Model,fill=Model),alpha=0.5) + geom_col(position='dodge') + facet_wrap(~Stat,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))  + labs(title="Pre-Diabetes Diagnosis",subtitle="Plots separated by Statistic",fill="Model") 
+)
+```
+
+
+```{r Diabetes TP, TN, FP, FN , A1c-group by 0.4%}
+### DM
+r = 'Pred.Base';s='DM'
+df.dm.confusion.4<- office_test[int.resample.test,] %>% 
+  mutate(A1c.DM = a1c >= 6.5 ) %>%
+  mutate(Base.DM = Pred.Base >= f.get.thresh("Pred.Base",s)) %>%
+  mutate(SDOH.DM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)) %>%
+  mutate(Fasting.DM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)) %>%
+  mutate(Urine.Var.DM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)) %>%
+  mutate(Var2.DM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)) %>%
+  mutate(Full.DM = Pred.Full >= f.get.thresh("Pred.Full",s)) %>%
+  mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.4),right=FALSE) ) %>% 
+  group_by(a1c_group)  %>% 
+  summarise(A1c.DM.Sum.TP = sum(A1c.DM & two >=  200),
+            Base.DM.Sum.TP = sum(Base.DM & two >= 200),
+            SDOH.DM.Sum.TP = sum(SDOH.DM & two >= 200),
+            Fasting.DM.Sum.TP = sum(Fasting.DM & two >= 200),
+            UrineVar.DM.Sum.TP = sum(Urine.Var.DM & two >= 200),
+            Var2.DM.Sum.TP = sum(Var2.DM & two >= 200),
+            Full.DM.Sum.TP = sum(Full.DM & two >= 200),
+
+            A1c.DM.Sum.FP = sum(A1c.DM & two < 200),                        
+            Base.DM.Sum.FP = sum(Base.DM & two < 200),
+            SDOH.DM.Sum.FP = sum(SDOH.DM & two < 200),
+            Fasting.DM.Sum.FP = sum(Fasting.DM & two < 200),
+            UrineVar.DM.Sum.FP = sum(Urine.Var.DM & two < 200),
+            Var2.DM.Sum.FP = sum(Var2.DM & two < 200),
+            Full.DM.Sum.FP = sum(Full.DM & two < 200),
+            
+            A1c.DM.Sum.FN = sum(!A1c.DM & two >=  200),
+            Base.DM.Sum.FN = sum(!Base.DM & two >= 200),
+            SDOH.DM.Sum.FN = sum(!SDOH.DM & two >= 200),
+            Fasting.DM.Sum.FN = sum(!Fasting.DM & two >= 200),
+            UrineVar.DM.Sum.FN = sum(!Urine.Var.DM & two >= 200),
+            Var2.DM.Sum.FN = sum(!Var2.DM & two >= 200),
+            Full.DM.Sum.FN = sum(!Full.DM & two >= 200),   
+            
+            A1c.DM.Sum.TN = sum(!A1c.DM & two <  200),
+            Base.DM.Sum.TN = sum(!Base.DM & two <  200),
+            SDOH.DM.Sum.TN = sum(!SDOH.DM & two <  200),
+            Fasting.DM.Sum.TN = sum(!Fasting.DM & two <  200),
+            UrineVar.DM.Sum.TN = sum(!Urine.Var.DM & two <  200),
+            Var2.DM.Sum.TN = sum(!Var2.DM & two <  200),
+            Full.DM.Sum.TN = sum(!Full.DM & two <  200)             
+            
+            ) %>% 
+  ungroup() %>% pivot_longer(-a1c_group,values_to = "Count") %>%
+    separate_wider_delim(name,".",names=c("Model","Diagnosis",NA,"Stat")) %>% mutate(Stat=paste0(Stat,'R')) %>% 
+    mutate(Model = factor(Model,levels=c("A1c","Base","Fasting","SDOH","UrineVar","Var2", "Full"))) %>% mutate(Percentage = Count / resample.size * 100)  %>% mutate(`A1c Group`= if_else(a1c_group=="[3.7,4.1)"| a1c_group=="[4.1,4.5)","[4.0,4.5)",a1c_group)) %>% group_by(`A1c Group`,Stat,Diagnosis,Model) %>% summarise(Count=sum(Count),Percentage=sum(Percentage))  
+
+df.dm.confusion.4
+
+
+grid.arrange(ncol=2,
+df.dm.confusion.4 %>%   ggplot(aes(x=Model,y=Percentage,group=Stat,fill=Stat),alpha=0.5) + geom_col() + facet_wrap(~`A1c Group`,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))  + labs(title="Diabetes Diagnosis",subtitle="Plots separated by A1c range",fill="Statistic") ,
+
+
+  
+df.dm.confusion.4 %>%   ggplot(aes(x=`A1c Group`,y=Percentage,group=Model,fill=Model),alpha=0.5) + geom_col(position='dodge') + facet_wrap(~Stat,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))  + labs(title="Diabetes Diagnosis",subtitle="Plots separated by Statistic",fill="Model") 
+
+)
+
+```
+
+
+```{r Pre-Diabetes TP, TN, FP, FN , A1c-group by 0.8%}
+resample.size <- 100000
+int.resample.test <- resample(seq(1,dim(office_test)[1]),probs=weight.sample.test/sum(weight.sample.test),size=100000)
+
+f.get.thresh <- function(r,s) df.stat.2[df.stat.2$Rowname==r & df.stat.2$Diagnosis==s,"threshold"]
+
+
+
+r = 'Pred.Base';s='PDM'
+df.pdm.confusion.8<-office_test[int.resample.test,] %>% 
+  mutate(A1c.PDM = a1c >= 5.7 & a1c < 6.5 ) %>%
+  mutate(Base.PDM = Pred.Base >= f.get.thresh("Pred.Base",s) & Pred.Base < f.get.thresh("Pred.Base","DM") )%>%
+  mutate(SDOH.PDM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)& Pred.SDOH < f.get.thresh("Pred.SDOH","DM") )%>%
+  mutate(Fasting.PDM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)& Pred.Fasting < f.get.thresh("Pred.Fasting","DM") )%>%
+  mutate(Urine.Var.PDM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)& Pred.Urine.Var < f.get.thresh("Pred.Urine.Var","DM") )%>%
+  mutate(Var2.PDM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)& Pred.Var2 < f.get.thresh("Pred.Var2","DM") )%>%
+  mutate(Full.PDM = Pred.Full >= f.get.thresh("Pred.Full",s)& Pred.Full < f.get.thresh("Pred.Full","DM") )%>% 
+  mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.8),right=FALSE) ) %>% 
+  group_by(a1c_group)  %>% 
+  summarise(A1c.PDM.Sum.TP = sum(A1c.PDM & two >= 140 & two < 200),
+            Base.PDM.Sum.TP = sum(Base.PDM & two >= 140 & two < 200),
+            Fasting.PDM.Sum.TP = sum(Fasting.PDM & two >= 140 & two < 200),
+            SDOH.PDM.Sum.TP = sum(SDOH.PDM & two >= 140 & two < 200),
+            UrineVar.PDM.Sum.TP = sum(Urine.Var.PDM & two >= 140 & two < 200),
+            Var2.PDM.Sum.TP = sum(Var2.PDM & two >= 140 & two < 200),
+            Full.PDM.Sum.TP = sum(Full.PDM & two >= 140 & two < 200),
+            
+            A1c.PDM.Sum.FP = sum(A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.FP = sum(Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.FP = sum(SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.FP = sum(Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.FP = sum(Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.FP = sum(Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.FP = sum(Full.PDM & (two < 140 | two >= 200)),
+            
+            A1c.PDM.Sum.FN = sum(!A1c.PDM & (two >= 140 & two < 200)),
+            Base.PDM.Sum.FN = sum(!Base.PDM & (two >= 140 & two < 200)),
+            SDOH.PDM.Sum.FN = sum(!SDOH.PDM & (two >= 140 & two < 200)),
+            Fasting.PDM.Sum.FN = sum(!Fasting.PDM & (two >= 140 & two < 200)),
+            UrineVar.PDM.Sum.FN = sum(!Urine.Var.PDM & (two >= 140 & two < 200)),
+            Var2.PDM.Sum.FN = sum(!Var2.PDM & (two >= 140 & two < 200)),
+            Full.PDM.Sum.FN = sum(!Full.PDM & (two >= 140 & two < 200)),            
+
+            A1c.PDM.Sum.TN = sum(!A1c.PDM & (two < 140 | two >= 200)),
+            Base.PDM.Sum.TN = sum(!Base.PDM & (two < 140 | two >= 200)),
+            SDOH.PDM.Sum.TN = sum(!SDOH.PDM & (two < 140 | two >= 200)),
+            Fasting.PDM.Sum.TN = sum(!Fasting.PDM & (two < 140 | two >= 200)),
+            UrineVar.PDM.Sum.TN = sum(!Urine.Var.PDM & (two < 140 | two >= 200)),
+            Var2.PDM.Sum.TN = sum(!Var2.PDM & (two < 140 | two >= 200)),
+            Full.PDM.Sum.TN = sum(!Full.PDM & (two < 140 | two >= 200)),            
+                        
+            ) %>% 
+  ungroup() %>% pivot_longer(-a1c_group,values_to = "Count") %>%
+    separate_wider_delim(name,".",names=c("Model","Diagnosis",NA,"Stat")) %>%
+    mutate(Model = factor(Model,levels=c("A1c","Base","Fasting","SDOH","UrineVar", "Full"))) %>% mutate(Percentage = Count / resample.size * 100)  %>% mutate(`A1c Group`= if_else(a1c_group=="[3.3,4.1)" | a1c_group=="[4.1,4.9)","[4.0,4.9)",a1c_group)) %>% group_by(`A1c Group`,Stat,Diagnosis,Model) %>% summarise(Count=sum(Count),Percentage=sum(Percentage)) 
+
+df.pdm.confusion.8
+
+df.pdm.confusion.8 %>%   ggplot(aes(x=Model,y=Percentage,group=Stat,fill=Stat),alpha=0.5) + geom_col() + facet_wrap(~`A1c Group`,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5)) + labs(title="Pre-Diabetes Diagnosis",subtitle="Plots separated by A1c range",fill="Statistic") 
+
+df.pdm.confusion.8 %>%   ggplot(aes(x=`A1c Group`,y=Percentage,group=Model,fill=Model),alpha=0.5) + geom_col(position='dodge') + facet_wrap(~Stat,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))  + labs(title="Pre-Diabetes Diagnosis",subtitle="Plots separated by Statistic",fill="Model") 
+
+
+```
+
+
+
+
+```{r Diabetes TP, TN, FP, FN , A1c-group by 0.8%}
+### DM
+r = 'Pred.Base';s='DM'
+office_test[int.resample.test,] %>% 
+  mutate(A1c.DM = a1c >= 6.5 ) %>%
+  mutate(Base.DM = Pred.Base >= f.get.thresh("Pred.Base",s)) %>%
+  mutate(SDOH.DM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)) %>%
+  mutate(Fasting.DM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)) %>%
+  mutate(Urine.Var.DM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)) %>%
+  mutate(Var2.DM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)) %>%
+  mutate(Full.DM = Pred.Full >= f.get.thresh("Pred.Full",s)) %>%
+  mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.8),right=FALSE) ) %>% 
+  group_by(a1c_group)  %>% 
+  summarise(A1c.DM.Sum.TP = sum(A1c.DM & two >=  200),
+            Base.DM.Sum.TP = sum(Base.DM & two >= 200),
+            SDOH.DM.Sum.TP = sum(SDOH.DM & two >= 200),
+            Fasting.DM.Sum.TP = sum(Fasting.DM & two >= 200),
+            UrineVar.DM.Sum.TP = sum(Urine.Var.DM & two >= 200),
+            Var2.DM.Sum.TP = sum(Var2.DM & two >= 200),
+            Full.DM.Sum.TP = sum(Full.DM & two >= 200),
+
+            A1c.DM.Sum.FP = sum(A1c.DM & two < 200),                        
+            Base.DM.Sum.FP = sum(Base.DM & two < 200),
+            SDOH.DM.Sum.FP = sum(SDOH.DM & two < 200),
+            Fasting.DM.Sum.FP = sum(Fasting.DM & two < 200),
+            UrineVar.DM.Sum.FP = sum(Urine.Var.DM & two < 200),
+            Var2.DM.Sum.FP = sum(Var2.DM & two < 200),
+            Full.DM.Sum.FP = sum(Full.DM & two < 200),
+            
+            A1c.DM.Sum.FN = sum(!A1c.DM & two >=  200),
+            Base.DM.Sum.FN = sum(!Base.DM & two >= 200),
+            SDOH.DM.Sum.FN = sum(!SDOH.DM & two >= 200),
+            Fasting.DM.Sum.FN = sum(!Fasting.DM & two >= 200),
+            UrineVar.DM.Sum.FN = sum(!Urine.Var.DM & two >= 200),
+            Var2.DM.Sum.FN = sum(!Var2.DM & two >= 200),
+            Full.DM.Sum.FN = sum(!Full.DM & two >= 200),   
+            
+            A1c.DM.Sum.TN = sum(!A1c.DM & two <  200),
+            Base.DM.Sum.TN = sum(!Base.DM & two <  200),
+            SDOH.DM.Sum.TN = sum(!SDOH.DM & two <  200),
+            Fasting.DM.Sum.TN = sum(!Fasting.DM & two <  200),
+            UrineVar.DM.Sum.TN = sum(!Urine.Var.DM & two <  200),
+            Var2.DM.Sum.TN = sum(!Var2.DM & two <  200),
+            Full.DM.Sum.TN = sum(!Full.DM & two <  200)             
+            
+            ) %>% 
+  ungroup() %>% pivot_longer(-a1c_group,values_to = "Count") %>%
+    separate_wider_delim(name,".",names=c("Model","Diagnosis",NA,"Stat")) %>%
+    mutate(Model = factor(Model,levels=c("A1c","Base","Fasting","SDOH","UrineVar", "Full"))) %>% mutate(Percentage = Count / resample.size * 100)  %>% mutate(`A1c Group`= if_else(a1c_group=="[3.3,4.1)" | a1c_group=="[4.1,4.9)","[4.0,4.9)",a1c_group)) %>% group_by(`A1c Group`,Stat,Diagnosis,Model) %>% summarise(Count=sum(Count),Percentage=sum(Percentage)) %>% 
+  ggplot(aes(x=Model,y=Percentage,group=Stat,fill=Stat),alpha=0.5) + geom_col() + facet_wrap(~`A1c Group`,scale="free") + theme(axis.text.x = element_text(angle = 45, vjust = 1.0, hjust=1),plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))  + labs(title="Diabetes Diagnosis",subtitle="Plots separated by A1c range",fill="Statistic") 
+
+
+```
+
+
+```{r}
+office_test[int.resample.test,] %>% 
+  mutate(A1c.DM = a1c >= 6.5 ) %>%
+  mutate(Base.DM = Pred.Base >= f.get.thresh("Pred.Base",s)) %>%
+  mutate(SDOH.DM = Pred.SDOH >= f.get.thresh("Pred.SDOH",s)) %>%
+  mutate(Fasting.DM = Pred.Fasting >= f.get.thresh("Pred.Fasting",s)) %>%
+  mutate(Urine.Var.DM = Pred.Urine.Var >= f.get.thresh("Pred.Urine.Var",s)) %>%
+  mutate(Var2.DM = Pred.Var2 >= f.get.thresh("Pred.Var2",s)) %>%
+  mutate(Full.DM = Pred.Full >= f.get.thresh("Pred.Full",s)) %>%
+  mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.8),right=FALSE) ) %>% 
+  group_by(a1c_group) %>% select(a1c,a1c_group) %>% filter(a1c <5.7)
+```

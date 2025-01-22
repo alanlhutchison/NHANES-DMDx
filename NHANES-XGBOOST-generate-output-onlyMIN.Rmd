@@ -1,0 +1,1057 @@
+---
+title: "NHANES-XGBOOST"
+author: "alanlhutchison"
+date: "2024-10-31"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## XGBOST CODE
+
+This code takes the DF file and renames and winnows down the features, then applies various XGBOOST models to generate output figures for the NHANES DxDM manuscript.
+
+```{r Libraries, include=FALSE,echo=FALSE}
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+
+#install.packages('nhanesA')
+#install.packages('foreign')
+#install.packages("xgboost")
+#install.packages("caret")
+#install.packages("dplyr")
+
+library(xgboost)
+library(caret)
+library(dplyr)
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+library(Hmisc)
+library(glmnet)
+library(tidymodels)
+library(data.table)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+load('df.master-2024.08.18.Rda')
+```
+
+
+
+
+```{r Making DF.MASTER}
+
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+
+
+df <- df.master %>% 
+  mutate(LBXIN = if_else(!is.na(LBXIN.x),LBXIN.x,LBXIN.y )) %>% select(-LBXIN.x) %>% select(-LBXIN.y) %>% 
+  mutate(WTSAF2YR = if_else(!is.na(WTSAF2YR.x),WTSAF2YR.x,WTSAF2YR.y ))  %>% select(-WTSAF2YR.x) %>% select(-WTSAF2YR.y) %>% 
+  
+  ### We are going to update everything match 2015-2016 as best we can
+  mutate(
+  ### INS adjustment
+  #### Insulin (2011 & post-2011) = 0.8868*Insulin (pre-2011) + [0.0011*Insulin (pre-2011)**2] – 0.0744.  
+  LBXIN = if_else(Year < 2011, 0.8868*LBXIN + (0.0011*LBXIN**2) - 0.0744, LBXIN )) %>% 
+  mutate(
+  #### Insulin (Tosoh-equivalent 2013 & post-2013) = 10**(1.024*log10(Roche insulin 2011-2012) – 0.0802)
+  LBXIN = if_else(Year < 2013, 10**(1.024*log10(LBXIN) - 0.0802),LBXIN),
+  ### GLU adjustment
+  ### Y (Roche ModP 2007) = X (Roche 911 2005-2006) + 1.148, n=143, r=0.997, slope was not significant.
+  LBXGLU = if_else(Year < 2007, LBXGLU + 1.148, LBXGLU),
+  LBXGLT = if_else(Year < 2007, LBXGLT + 1.148, LBXGLT),
+  ## FPG
+  ) %>% 
+  mutate(
+  ### GLU Forward: Y (C311 2015-2016) = 1.023 (95%CI: 1.014 – 1.032) * X (C501 2013-2014) - 0.5108 (95%CI: -1.441 – 0.4197)
+  LBXGLU = if_else(Year < 2015, 1.023 * LBXGLU - 0.5108, LBXGLU  ),
+  LBXGLT = if_else(Year < 2015, 1.023 * LBXGLT - 0.5108, LBXGLT ),
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR),
+  ### UCr adjustment for < 2007,
+  #### Urine Creatinine < 75: Y(adjusted Creatinine) = [1.02*sqrt(X, unadjusted Creatinine) – 0.36]**2
+  #### Urine Creatinine 75 to < 250: Y(adjusted Creatinine) = [1.05*sqrt(X, unadjusted Creatinine) – 0.74]**2
+  #### Urine Creatinine >=250: Y(adjusted Creatinine) = [1.01*sqrt(X, unadjusted Creatinine) – 0.10]**2
+  URXUCR = if_else(Year < 2007,
+                   if_else(URXUCR < 75, (1.02*sqrt(URXUCR) - 0.36)**2,
+                           if_else(URXUCR >= 250,
+                                   (1.01*sqrt(URXUCR) - 0.10)**2,
+                                   (1.05*sqrt(URXUCR) - 0.74)**2 )
+                          ),
+                   URXUCR)
+  ) %>% 
+
+  rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
+         sample.interview.weight = WTINT2YR,
+         sample.mec.weight = WTMEC2YR,
+                           ## Alcohol survey
+                           alc.one.per.month = ALQ101, alc.12.lifetime = ALQ110, alc.often.year = ALQ120Q, alc.often.year.unit = ALQ120U,
+                           alc.per.day = ALQ130, alc.4.5.per.day = ALQ141Q, alc.4.5.per.day.unit = ALQ141U, alc.4.5.day.ever = ALQ151, alc.4.5.2.hours = ALQ160, 
+              ## Urine
+              u.alb = URXUMA,u.cr = URXUCR, # urine albumin, urine creatinine
+              ## Anthropometrics
+
+             # htn.ever = BPQ020, htn.2times = BPQ030, htn.age = BPD035, htn.pharm = BPQ040A, htn.taking.meds = BPQ050A, 
+              ## HLD questinos
+              hld.ever = BPQ080, hld.checked = BPQ060, hld.last = BPQ070, hld.pharm = BPQ090D, hld.taking.meds = BPQ100D,
+              ## CBC
+              wbc = LBXWBCSI, rbc = LBXRBCSI, hg = LBXHGB, mcv = LBXMCVSI, plt = LBXPLTSI, mpv = LBXMPSI, # WBC, RBC, Hg, MCV, PLT, MPV
+              ## CMP
+              alt = LBXSATSI, alb = LBXSAL, alp = LBXSAPSI, ast = LBXSASSI, # ALT, albumin, ALP, AST
+              ## CMP
+              bicarb = LBXSC3SI, bun = LBXSBU, chlor = LBXSCLSI, choles = LBXSCH, # Bicarb,  BUN, Chlor, Chol serum
+              ## CMP
+              cpk = LBXSCK, cr = LBXSCR, ggt = LBXSGTSI, gluc = LBXSGL, # CPK, Creat, GGT, Gluc
+              ## CMP
+              iron = LBXSIR, ldh = LBXSLDSI, phos = LBXSPH, potas = LBXSKSI, #Iron, LDH, Phos, K
+              ## CMP
+              na = LBXSNASI, tbili = LBXSTB, cal = LBXSCA, tprot = LBXSTP, # Na, TBili, Cal, TProt
+              tgy = LBXSTR, urica = LBXSUA, # TGY, UricAcid
+              ## DEXA
+              #dexa.valid = DXAEXSTS, 
+              dexa.body = DXXAGST,  # valid DEXA==1, valid android/gynoid DEXA==1
+              android.fat.mass = DXXANFM, android.lean.mass = DXXANLM, android.total.mass = DXXANTOM, gynoid.fat.mass = DXXGYFM, gynoid.lean.mass = DXXGYLM,
+              gynoid.total.mass = DXXGYTOM, android.to.gynoid = DXXAGRAT, android.percent.fat = DXXAPFAT, gynoid.percent.fat = DXXGPFAT, subcut.fat.area = DXXSATA, subcut.fat.mass = DXXSATM, sub.fat.vol = DXXSATV, tot.abd.fat.area = DXXTATA, total.abd.fat.mass = DXXTATM, total.abd.fat.vol = DXXTATV, visc.adi.tissue.area = DXXVFATA, visc.adi.tissue.mass = DXXVFATM, visc.adi.tissue.vol = DXXVFATV, 
+              ## Blood markers
+              #ferritin = LBXFER, 
+             #folate = LBDRFO, # Ferritin**, Folate,
+              fpg = LBXGLU, # FPG**, 
+              ## Hepatitis C
+              HepC.VL = LBXHCR, 
+              HepC.Geno= LBXHCG, # HepC CL, Hep C genotype
+              insulin = LBXIN, # Insulin
+              ## Vital Signs
+              pulse = BPXPLS, reg.iregg = BPXPULS, sbp1 = BPXSY1, dbp1 = BPXDI1, sbp2 = BPXSY2, dbp2 = BPXDI2,  sbp3=BPXSY3,dbp3=BPXDI3,# Pulse, regular / irregular, SBP1, DBP1, SBP2,DBP2
+              ## Cholesterol
+              #hdl = LBDHDD, 
+              #t.chol = LBXTC, #HDL, serum total cholesterol,
+              ## Weight Survey
+              dr.told.weight = MCQ365A, dr.told.exercise = MCQ365B, dr.told.salt = MCQ365C, dr.told.diet=MCQ365D,
+              weight.control.now=MCQ370A,exercise.increase.now=MCQ370B,salt.reducing.now=MCQ370C,fat.reduce.now=MCQ370D, # diabetes questionaire
+              a1c = LBXGH, #glycohemoglobin
+              ## Viral 
+              Hep.A = LBXHA, # Hep A
+              HepB.cAb = LBXHBC, Hep.sAg = LBDHBG, HepD = LBDHD, # HepB cAb, HepB sAg, HepD
+              HepB.sAb = LBXHBS, # HepB sAb
+              HepE.G = LBDHEG, HepE.M = LBDHEM, # HepE IgG, IgM
+              #HSV1.Ab = LBXHE1, HSV2.Ab = LBXHE2, # HSV1 Ab, HSV2 Ab
+              #HIV = LBXHIVC, HIV1 = LBXHIV1, HIV2 = LBXHIV2, HIV.NAT = LBXHNAT, # HIV
+              ## Liver survey
+              Liver.Ever = MCQ160L, Liver.Still =  MCQ170L, Liver.Age = MCQ180L, # Any liver condition, do you still have liver condition, age when you were told you had liver condition
+              sample.ogtt.weight = WTSOG2YR, two = LBXGLT,  # subsample weight, two hour glucose (mg/dL),
+              two.mmol = LBDGLTSI, admin.time = GTDSCMMN, # two hour glucose (mmol/L), adiminstration time,
+              ogtt.time.gluc.chall = GTDDR1MN, ogtt.time.gluc.ogtt = GTDBL2MN, # time from fast glucose and challenge,Time from fasting glucose & OGTT (min),
+              ogtt.time.total=GTDDR2MN,ogtt.amount = GTXDRANK, ogtt.incomplete = GTDCODE,  # Time from glucose challenge & OGTT(min),Amount of glucose challenge drank, Incomplete OGTT Comment Code
+              #transferr = LBXTFR, # Transferrin receptor (mg/L)
+              sample.fasting.weight = WTSAF2YR, #Fasting Subsample 2 Year MEC Weight
+              #tryg = LBXTR, ldlc = LBDLDL, # Triglyceride (mg/dL), LDL-cholesterol (mg/dL)
+              #total.testosterone = LBXTST, testosterone.comment = LBDTSTLC, estradiol = LBXEST, estradiol.comment = LBDESTLC, shbg = LBXSHBG, shbg.comment = LBDSHGLC, # Testosterone, total (ng/dL), Testosterone comment code,  Estradiol (pg/mL), Estradiol Comment Code, SHBG (nmol/L), SHBG Comment Code
+dm.told = DIQ010, dm.age=DID040, pdm.told = DIQ160, dm.told.ever = DIQ170, dm.feel.risk=DIQ172,
+dm.famhx = DIQ175A, dm.risk.overweight = DIQ175B, dm.risk.age = DIQ175C, dm.risk.diet=DIQ175D,
+dm.risk.race = DIQ175E, dm.risk.weight = DIQ175F, dm.risk.physc = DIQ175G, dm.risk.htn = DIQ175H, dm.risk.hyper = DIQ175I, dm.risk.hld = DIQ175J, dm.risk.hypo = DIQ175K, dm.risk.hunger=DIQ175L, dm.risk.numb = DIQ175M, dm.risk.blur = DIQ175N, dm.risk.fatigue = DIQ175O, dm.risk.anyone = DIQ175P, dm.risk.doctor = DIQ175Q, dm.risk.other= DIQ175Q, dm.risk.gest = DIQ175S, dm.risk.urine = DIQ175T, dm.risk.thirst = DIQ175U, dm.risk.crave = DIQ175V, dm.risk.meds = DIQ175W, dm.risk.PCOS=DIQ175X, dm.test.3yrs = DIQ180, dm.taking.insulin.now = DIQ050, dm.insulin.how.long = DID060, dm.insulin.length.unit = DIQ060U,
+dm.taking.pills.now = DIQ070, dm.saw.dr.how.long = DIQ230, dm.dr = DIQ240, dm.dr.past.year = DID250, dm.check.freq = DID260, dm.check.freq.unit = DIQ260U, dm.check.a1c = DIQ275, dm.last.A1c = DIQ280, dm.a1c.goal = DIQ291, dm.recent.sbp = DIQ300S, dm.recent.dbp = DIQ300D, dm.sbp.goal = DID310S, dm.dbp.goal = DID310D, dm.recent.ldl = DID320, dm.ldl.goal = DID330, dm.dr.check.sores = DID341, dm.self.check.feet = DID350, dm.self.check.feet.units =DIQ350U,dm.last.pupils = DIQ360, dm.retin = DIQ080,
+CHF.ever = MCQ160B, CHF.age = MCQ180B, CAD.ever = MCQ160C, CAD.age = MCQ180C, anigina.ever = MCQ160D, angina.ga = MCQ180D, HA.ever = MCQ160E, HA.age = MCQ180E, stroke.ever = MCQ160F, stroke.age = MCQ180F, thyroid.ever = MCQ160M, thyroid.still = MCQ170M, thyroid.age = MCQ180M, jaundice.ever = MCQ203, jaundice.age = MCQ206, cancer.ever = MCQ220,cancer.type.a = MCQ230A, cancer.type.b = MCQ230B, cancer.type.c = MCQ230C, cancer.type.d = MCQ230D,
+relative.HA = MCQ300A, relative.asthma=MCQ300B, relative.dm = MCQ300C,
+#vigorous.work.yes=PAQ605, days.vigorous.work=PAQ610, min.vigorous.work=PAD615, mod.work.yes=PAQ620,days.mod.work=PAQ625,min.mod.work=PAD630,
+#vigorous.rec.yes=PAQ650,days.vig.rec=PAQ655,min.vig.rec=PAD660,
+#mod.rec.yes=PAQ665,days.mod.rec=PAQ670,min.mod.rec=PAD675,
+
+### Body Measures
+Weight = BMXWT,
+Height.Stand = BMXHT,
+BMI = BMXBMI,
+Arm.Circ = BMXARMC,
+Waist.Circ = BMXWAIST,
+Thigh.Circ = BMXTHICR,
+Triceps.Skin = BMXTRI,
+
+    # Sleep Measures
+     Usual.Sleep.Time.Week= SLQ300,
+     Usual.Wake.Time.Week = SLQ310,
+     
+     #Sleep.Hours.Week= SLD012,
+     #Usual.Sleep.Time.Weekend = SLQ320,
+     #Usual.Wake.Time.Weekend = SLQ330,
+     #Sleep.Hours.Weekend = SLD013,
+     #Snore.Often = SLQ030,
+     #Snort.Apnea.Often = SLQ040,
+     #Told.Dr.Trouble.Sleeping = SLQ050,
+     #Overly.Sleepy.Often = SLQ120,
+
+   How.Much.Sleep.Hr = SLD010H,
+   How.Long.Fall.Asleep.Min = SLD020M,
+   Often.Snore = SLQ030,
+   Often.Snort.Apnea = SLQ040,
+   Dr.Told.Sleep.Disorder = SLQ060,
+   Told.Sleep.Apnea = SLQ070A,
+   Told.Insomnia = SLQ070B,
+   Told.Restless.Legs= SLQ070C,
+   Told.Sleep.Disorder.Other = SLQ070D,
+   How.Often.Trouble.Falling.Asleep = SLQ080,
+   How.Often.Wake.Up.At.Night = SLQ090,
+   How.Often.Wake.Too.Early = SLQ100,
+   How.Often.Feel.Unrested = SLQ110,
+   How.Often.Feel.Sleepy = SLQ120,
+   How.Often.Not.Enough.Sleep = SLQ130,
+   How.Often.Sleeping.Pills = SLQ140,
+   How.Often.Leg.Jerks = SLQ150,
+   How.Often.Leg.Cramp = SLQ160,
+   Difficulty.Concentrating.When.Tired = SLQ170,
+   Difficulty.Remembering.When.Tired = SLQ180,
+   Difficulty.Eating.When.Tired = SLQ190,
+   Difficulty.Hobby.When.Tired = SLQ200,
+   Difficulty.Getting.Things.Done = SLQ210,
+   Difficulty.Finance.Tired = SLQ220,
+   Difficulty.Work.Tired = SLQ230,
+   Difficulty.Phone.Tired = SLQ240,
+   Sleep.Hours = SLD012,
+
+  Grip.Test.Status = MGDEXSTS,
+  Surgery.Hands.Ever = MGD050,
+  Surgery.Which.Hand = MGD060,
+  Recent.Pain.R.Hand = MGQ070,
+  Cause.Pain.R.Hand = MGQ080,
+  Pain.R.Hand.Worse = MGQ090,
+  Recent.Pain.L.Hand = MGQ100,
+  Cause.Pain.L.Hand = MGQ110,
+  Pain.L.Hand.Worse = MGQ120,
+  Dom.Hand = MGD130,
+  Angle.90.Index.Finger = MGQ90DG,
+  Testing.Position = MGDSEAT,
+  Hand.Practice = MGAPHAND,
+  Hand.Begin = MGATHAND,
+  Grip.Hand.1.Test.1.kg = MGXH1T1,
+  Grip.Hand.1.Test.1.Effort = MGXH1T1E,
+  Grip.Hand.2.Test.1.kg = MGXH2T1,
+  Grip.Hand.2.Test.1.Effort = MGXH2T1E,
+  Grip.Hand.1.Test.2.kg = MGXH1T2,
+  Grip.Hand.1.Test.2.Effort = MGXH1T2E,
+  Grip.Hand.2.Test.2.kg = MGXH2T2,
+  Grip.Hand.2.Test.2.Effort = MGXH2T2E,
+  Grip.Hand.1.Test.3.kg = MGXH1T3,
+  Grip.Hand.1.Test.3.Effort = MGXH1T3E,
+  Grip.Hand.2.Test.3.kg = MGXH2T3,
+  Grip.Hand.2.Test.3.Effort = MGXH2T3E,
+  Comb.Grip.Strength.kg = MGDCGSZ
+) %>% 
+  ### COMBINE LANGUAGES
+ mutate(SIALANG=as.integer(SIALANG=='Spanish'),MIALANG=as.integer(MIALANG=='Spanish'),FIALANG=as.integer(FIALANG=='Spanish')) %>% rowwise() %>%  mutate(LANG=sum(SIALANG,MIALANG, FIALANG,na.rm=TRUE)) %>% select(-c(SIALANG,MIALANG,FIALANG)) %>% ungroup() %>% 
+  mutate(Sleep.Hours = if_else(is.na(Sleep.Hours),How.Much.Sleep.Hr,Sleep.Hours)) %>% select(-How.Much.Sleep.Hr) %>% 
+  ### COMBINE BLOOD PRESSURE
+  mutate(SBP = ( f.na.to.0(sbp1)+f.na.to.0(sbp2)+f.na.to.0(sbp3)) / (f.na.or.low(sbp1) + f.na.or.low(sbp2) + f.na.or.low(sbp3) ) )    %>% mutate(DBP = ( f.na.to.0(dbp1)+f.na.to.0(dbp2)+f.na.to.0(dbp3)) / ( f.na.or.low(dbp1) + f.na.or.low(dbp2) + f.na.or.low(dbp3) ) )  %>% 
+  select(-sbp1,-sbp2,-dbp1,-dbp2,-sbp3,-dbp3) %>% 
+  ### FIX WEIGHTS
+  mutate(sample.fasting.weight = sample.fasting.weight / 6,
+         sample.ogtt.weight = sample.ogtt.weight / 6,
+         sample.interview.weight = sample.interview.weight / 6,
+         sample.mec.weight = sample.mec.weight / 6) %>%  # combining across 6 cycles
+select(-Year.x,-Year.y)  %>%  
+  ### Naming variables based on LASSO identification
+  rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>% 
+  ### Excluding labels that would be artefactual or duplicative
+
+  select(-Data.Release.Cycle,) %>% 
+  select(-c(TProt.g.L,UrineAlb.mg.L,Tbili.umol,phosphorus.mmol,triglycerides.mmol,glucose.mmol,BP.Arm,Seg.Neut.num,gluc,UricA)) %>% 
+  rename(Osmolality=LBXSOSSI,Num.Family=DMDFMSIZ,Arm.Length=BMXARML,BPCuff.Max.Inflation=BPXML1,Pulse.Site=BPXPTY,Globulin=LBXSGB,BP.Enhancement.3=BPAEN3,UpperLeg.Length=BMXLEG,TransfusionEver=MCQ092,Eos.Num=LBDEONO,BP.Enhancement.2=BPAEN2,CitizenStatus=DMDCITZN,Baso.Num=LBDBANO,MCHC=LBXMC,Chol.mmol=LBDSCHSI,fpg.mmol=LBDGLUSI,Calcium.mmol=LBDSCASI,UrineCr.mmol=URXCRS,Lympho.Num = LBDLYMNO,Mono.num=LBDMONO,Told.Asthma = MCQ010,BUN.mmol=LBDSBUSI,Baso.Perc=LBXBAPCT,Globulin.g.L=LBDSGBSI, BP.Ever.Told.High = BPQ020, Sleep.Ever.Told.Poor = SLQ050, ,Cr.umol = LBDSCRSI) %>% 
+  select(-c(Calcium.mmol,Chol.mmol,fpg.mmol,Baso.Num,Eos.Num,BP.Enhancement.2,Pulse.Site,BP.Enhancement.3,sample.interview.weight,BUN.mmol,sample.mec.weight,Globulin.g.L,Arm.Length,UpperLeg.Length)) %>% 
+  ### PROXY AND INTERPRETER
+  ### PROXY and INTERPRETER 
+  mutate(Proxy.Used = f.yes1.no0(Proxy.Used),Proxy.Mec.Used=f.yes1.no0(Proxy.Mec.Used),Interpreter.SP.interview=f.yes1.no0(Interpreter.SP.interview),Interpreter.Used=f.yes1.no0(Interpreter.Used),Interpreter.MIA=f.yes1.no0(Interpreter.MIA),FIAPROXY=f.yes1.no0(FIAPROXY)) %>% rowwise() %>% mutate(PROXY=sum(Proxy.Used,Proxy.Mec.Used,na.rm=TRUE),INTERPRETER=sum(Interpreter.Used,Interpreter.MIA,Interpreter.SP.interview,na.rm=TRUE)) %>% ungroup()  %>% mutate(PROXY=as.integer(PROXY>0),INTERPRETER=as.integer(INTERPRETER>0)) %>% 
+  select(-c(Proxy.Used,Proxy.Mec.Used,Interpreter.SP.interview,Interpreter.Used,Proxy.Mec.Used,Interpreter.Used,Interpreter.MIA,FIAPROXY,sample.fasting.weight,Head.Household.Age,Masked.Var.Pseduocode)) %>% 
+  rename(Masked.Var.Pseduo.Strat = SDMVSTRA,Enhance.BP1 = BPAEN1) %>% 
+  select(-c(Masked.Var.Pseduo.Strat,Enhance.BP1,two.mmol,UrineCr.mmol,Cr.umol,Time.of.Survey)) %>% rename(RaceEth=RIDRETH1,Marriage.Status=DMDHRMAR,EduLevel=DMDHREDU) %>% 
+rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>% 
+  select(-c(SEQN,BMI,BPCuff.Max.Inflation,iron.umol,Lympho.Num,alb.g.L,BMDSTATS)) %>% 
+  rename(Ever.Told.Overweight = MCQ080,Cuff.Size=BPACSZ) %>% 
+  select(-c(Cuff.Size,RIDSTATR,Gender.HeadHousehold,INTERPRETER,PROXY,Mono.num,Num.Family)) %>% 
+  ### Don't Know to Don't know
+  mutate(Marriage.Status=if_else(Marriage.Status=="Don't Know","Don't know",Marriage.Status)) %>% 
+  mutate(Anemia.Treatment=if_else(Anemia.Treatment=="no","No",Anemia.Treatment)) %>% 
+  mutate(EduLevel=if_else(EduLevel=="Don't Know","Don't know",EduLevel)) 
+#rename()
+#select(-c())
+
+
+#df %>% select(vigorous.work.yes, days.vigorous.work, min.vigorous.work,mod.work.yes,days.mod.work,min.mod.work,vigorous.rec.yes,days.vig.rec,min.vig.rec,mod.rec.yes,days.mod.rec,min.mod.rec) %>% 
+ # mutate(Phys.Act = if_else(vigorous.work.yes==1,days.vigorous.work*min.vigorous.work,0) +
+  #         if_else(mod.work.yes==1,days.mod.work*min.mod.work,0) + 
+   #        if_else(vigorous.rec.yes==1,days.vig.rec*min.vig.rec,0) + 
+    #       if_else(mod.rec.yes==1,days.mod.rec*min.mod.rec,0) )
+```
+
+
+```{r}
+
+
+
+    
+```
+
+
+
+
+```{r FILTER ON SOMETHING}
+
+df.small <- df %>% drop_na(a1c,two,sample.ogtt.weight)
+
+#df.small <- df.small %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>1.3)  %>% select(-FIB4)
+#df.small <- df.small %>% filter(hg < 13)
+#df.small <- df.small %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>2)  %>% select(-FIB4)
+#df.small <- df.small %>% filter(cr>1) 
+#df.small <- df.small %>% filter(alb<4.1) 
+#df.small <- df.small %>% filter(Age > 50) 
+
+
+dir.string <-"~/Documents/NHANES15-16/"
+
+# filter.string <- "all"
+# df.small <- df.small
+
+# df.small <- df.small %>% filter(Age > 50) 
+# filter.string <- "Age>50"
+
+# df.small <- df.small %>% filter(Age > 60)
+# filter.string <- "Age>60"
+
+# df.small <- df.small %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>2.67)
+# filter.string <- "FIB4>2.67"
+
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>25 & BMI<=30) %>% select(-BMI)
+# filter.string <- "BMI>25"
+# # 
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>30) %>% select(-BMI)
+# filter.string <- "BMI>30"
+
+# df.small <- df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>35) %>% select(-BMI)
+# filter.string <- "BMI>35"
+# 
+# df.small <- df.small %>% filter(SBP > 140)
+# filter.string <- "SBP>140"
+#
+# df.small <- df.small %>% filter(ggt > 40)
+# filter.string <- "ggt>40"
+
+# df.small <- df.small %>% filter((Waist.Circ > 100 & Gender=="Male"  & Waist.Circ <=110)| (Waist.Circ > 90 & Waist.Circ<=100 & Gender=="Female" ))  #cm
+# filter.string <- "WC100-110"
+# 
+# df.small <- df.small %>% filter((Waist.Circ > 110 & Gender=="Male" )| (Waist.Circ > 105 & Gender=="Female" ))  #cm
+# filter.string <- "WC>110"
+
+# df.small <- df.small %>% mutate(eGFR = 142 * 
+#                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+#                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+#                       0.9938 ^ Age *
+#                       ifelse(Gender=="Male",1,1.012)
+#                     )   %>% filter(eGFR < 60)
+# filter.string <- "eGFR<60"
+
+
+df.small <- df.small %>% filter(hg<13)  #cm
+filter.string <- "hg<13"
+
+# df.small <- df.small %>% select(fpg, Age, a1c, insulin, Height.Stand, tgy, SBP, Waist.Circ, choles, u.alb, cr, u.cr, DBP, Poverty.Ratio, Seg.Neut.perc, pulse, iron, Arm.Circ, plt, ggt,Year,sample.ogtt.weight,two)
+# filter.string <- "MINMODEL"
+
+
+
+file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_wIns_MIN_",filter.string,"_2024.12.12.Rda")
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_MIN_",filter.string,"_2024.12.12.Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_MIN_",filter.string,"_2024.12.12.Rda")
+file.list.models <- paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All-xgb.models")
+
+
+file.ROCs=paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All_ROCs.bmp" )
+file.importance.plots = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-ImportancePlots.bmp" )
+file.dca.all = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA-all.bmp" )
+file.dca.fib4 = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA_FIB4.bmp" )
+
+file.dca.min = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA_min-set.bmp" )
+
+
+```
+
+
+```{r}
+
+
+
+
+df.nas <-lapply(df.small,function(x) (sum(!is.na(x))))  %>% data.frame()  %>% t() %>% data.frame()
+names(df.nas) <- 'Col1'
+df.nas %>% dim()
+
+df.small <- df.small[,df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% rownames()] 
+
+
+office_train <- df.small %>% filter(Year < 2015) #training(office_split)
+office_test <- df.small %>% filter(Year == 2015) # testing(office_split)
+
+year.train <- office_train$Year
+year.test <- office_test$Year
+label.train <- office_train$two
+label.test <- office_test$two
+weight.sample.train <- office_train$sample.ogtt.weight
+weight.sample.test <- office_test$sample.ogtt.weight
+office_train <- office_train %>% select(-c(sample.ogtt.weight,Year,two))
+office_test <- office_test %>% select(-c(sample.ogtt.weight,Year,two))
+
+
+
+```
+
+
+```{r}
+# XGBoost requires the data to be in xgb.DMatrix format
+set.seed(1234)
+int.resample.train <- resample(seq(1,dim(office_train)[1]),probs=weight.sample.train/sum(weight.sample.train),size=10000)
+int.resample.test <- resample(seq(1,dim(office_test)[1]),probs=weight.sample.test/sum(weight.sample.test),size=10000)
+office_train.resampled <- office_train[int.resample.train,]
+office_test.resampled <- office_train[int.resample.test,]
+
+label.train.resampled <- label.train[int.resample.train]
+label.test.resampled <- label.test[int.resample.test]
+#dtrain <- xgb.DMatrix(data = makeX(office_train.resampled), label = label.train[int.resample.train])
+#dtest <- xgb.DMatrix(data = makeX(office_test.resampled), label = label.test[int.resample.test])
+
+office_train.makeX <- makeX(office_train)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+office_test.makeX <- makeX(office_test)
+
+colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+
+
+f.align_columns <- function(ma, mb) {
+  # Get the column names for MA and MB
+  ma_columns <- colnames(ma)
+  mb_columns <- colnames(mb)
+  
+  # Identify the columns in MA but not in MB
+  missing_columns <- setdiff(ma_columns, mb_columns)
+  
+  # Add missing columns to MB, filled with zeros
+  for (col in missing_columns) {
+    zero_col <- matrix(0, nrow = nrow(mb), ncol = 1)
+    colnames(zero_col) <- col
+    mb <- cbind(mb, zero_col)
+  }
+  
+  # Reorder columns in MB to match the order in MA
+  mb <- mb[, ma_columns, drop = FALSE]
+  
+  return(mb)
+}
+
+f.add.makeX.columns <- function(x){
+  #x <- cbind(x,`Marriage.StatusDon't know`=0)
+  x <- cbind(x,`EduLevelHigh School Grad/GED or equivalent`=0)
+  #x <- cbind(x,`EduLevelRefused`=0)
+  x <- cbind(x,`Marriage.StatusRefused`=0)
+  return(x)
+}
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+
+
+
+```
+
+
+```{r}
+#colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+```
+
+
+
+```{r}
+###
+tune_grid.25 <- expand.grid(
+  nrounds = c(200,500,800),
+  eta = c(0.01,0.02),
+  max_depth = c(4,6),
+  subsample = c(0.5,0.9),
+  colsample_bytree = c(0.3,0.6,0.9),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+
+tune_grid.27 <- expand.grid(
+  nrounds = c(1500,2000),
+  eta = c(0.01,0.05),
+  max_depth = c(6),
+  subsample = c(0.6),
+  colsample_bytree = c(0.6),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+tune_grid.28 <- expand.grid(
+  nrounds = c(2000),
+  eta = c(0.05),
+  max_depth = c(6,8),
+  subsample = c(0.6,0.8),
+  colsample_bytree = c(0.6),# bounded at maximum 1
+  min_child_weight = c(1),
+  gamma = c(0)
+)
+
+
+
+tune_grid.29 <- expand.grid(
+  nrounds = c(2000),
+  eta = c(0.05),
+  max_depth = c(6),
+  subsample = c(0.6),
+  colsample_bytree = c(0.6,0.8),# bounded at maximum 1
+  min_child_weight = c(1,5),
+  gamma = c(0,5)
+)
+
+train_control <- trainControl(method = "cv", 
+                              number = 5,
+                              verboseIter = TRUE)
+
+#practice.weights <- runif(length(weight.sample.train))
+### nrounds =2000 with eta = 0.05
+weight.sample.train.norm <- weight.sample.train / sum(weight.sample.train)
+#Use caret to tune
+xgb_tuned.full.29 <- caret::train(
+  method = "xgbTree",
+  x= makeX(office_train),
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.29,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+#xgb_tuned.full.resampled.no.weights.29$call
+```
+
+```{r}
+
+#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.12.10.Rda"
+save(xgb_tuned.full.29,file=file.xgb_tuned.full)
+
+#load(file=file.xgb_tuned.full)
+#xgb_tuned <- xgb_tuned.25
+```
+
+
+```{r}
+
+
+```
+
+
+```{r}
+#xgb.model.full <- xgb_tuned.full.29
+office_train.makeX <- makeX(office_train)
+office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+
+
+office_test.makeX <- makeX(office_test)
+
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+
+
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+dtest <- xgb.DMatrix(data = office_test.makeX, label = label.test)
+
+xgb.model.full<- xgboost::xgb.train(params=xgb_tuned.full.29$bestTune %>% flatten(),dtrain,nrounds=2000)
+
+sum(colnames(dtrain) %in% colnames(dtest))
+sum(colnames(dtrain)==colnames(dtest))
+colnames(dtrain)[!colnames(dtrain) %in% colnames(dtest)]
+colnames(dtest)[!colnames(dtrain) %in% colnames(dtest)]
+colnames(dtest)[!colnames(dtest) %in% colnames(dtrain)]
+colnames(dtest)[!colnames(dtest) %in% xgb.model.full$feature_names]
+
+office_test$Pred.Full <- predict(xgb.model.full,dtest)
+
+
+
+xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full)
+
+```
+
+```{r}
+colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
+
+```
+
+
+```{r}
+
+
+Var.Clinic = c("Age","Gender","pulse","SBP","DBP","Height.Stand","Weight","Waist.Circ","Arm.Circ","reg.iregg")
+Var.Hx = c("BP.Ever.Told.High","pdm.told","Sleep.Hours","dm.test.3yrs","Ever.Told.Overweight","TransfusionEver","Sleep.Ever.Told.Poor","dm.told","dm.told.ever","relative.asthma","Told.Asthma","Anemia.Treatment")
+Var.CBC = c("Seg.Neut.perc","Lymph.Perc","mcv","Monocyte.perc","eosin.perc","plt","Mean.Cell.Hemoglobin","mpv","rbc","hg","MCHC","Baso.Perc","wbc","RBC.Dist.Width")
+Var.CMP = c("na","potas","chlor","bicarb","bun","cr","cal","tprot","tbili","alb","ast","alt","alp","a1c")
+
+Var.Urine = c("u.alb", "u.cr")
+Var.Other.1 = c("ggt","phos","choles","HepB.sAb","HepB.cAb")
+Var.Other.2 = c("Globulin","ldh","urica","Hydroxycontine","Hep.A","Osmolality")
+Var.SDOH = c("Poverty.Ratio","RaceEth","Num.People.Household","Marriage.Status","LANG","CitizenStatus","EduLevel")
+
+Var.fasting = c("iron",'fpg','tgy','insulin')
+
+Var.Other.3 <- c("ggt","phos","u.alb", "u.cr","choles","HepB.sAb","HepB.cAb")
+
+Var.MIN <- c("fpg", "Age", "a1c", "insulin", "Height.Stand", "tgy", "SBP", "Waist.Circ", "choles", "u.alb", "cr", "u.cr", "DBP", "Poverty.Ratio", "Seg.Neut.perc", "pulse", "iron", "Arm.Circ", "plt", "ggt")
+### BASE: Clinic + Hx CBC + CMP + Hx
+### + Fasting
+### + Urine + Var.Other.1+ Var.Other.2 vs  + SDOH
+### Full
+
+
+
+```
+
+
+
+```{r}
+library(Gmisc)
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,show_all_values=TRUE,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Clinic,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Hx,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.CBC,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.CMP,Var.fasting,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.SDOH,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.Urine,Var.Other.1,Var.Other.2,add_total_col = TRUE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+  getDescriptionStatsBy(by=Year.2015,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+Var.MIN,add_total_col = FALSE,) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+
+```
+
+
+
+```{r}
+# tune_grid.mod <<- expand.grid(
+#   nrounds = c(1500,2000),
+#   eta = c(0.01,0.05),
+#   max_depth = c(6,8),
+#   subsample = c(0.6,0.8),
+#   colsample_bytree = c(0.6,0.8),# bounded at maximum 1
+#   min_child_weight = c(1),
+#   gamma = c(0)
+# ) 
+# 
+# train_control <- trainControl(method = "cv", 
+#                               number = 5,
+#                               verboseIter = TRUE)
+# 
+# 
+# office_test$two <- label.test
+# #office_test$Pred.Full <- predict(xgb.model.full,dtest)
+# 
+# 
+# #office_train %>% select(all_of(Var.fasting))
+# office_train.Base <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
+# office_train.makeX <- makeX(office_train.Base)
+# dtrain <- xgb.DMatrix(data = makeX(office_train.Base), label = label.train)
+# 
+# 
+# office_test.Base <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
+# 
+# office_test.makeX <-  makeX(office_test.Base)
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# 
+# #Use caret to tune
+# xgb_tuned.Base <- caret::train(
+#   method = "xgbTree",
+#   x= makeX(office_train.Base),
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# xgb.model.Base<- xgboost::xgb.train(params=xgb_tuned.Base$bestTune %>% flatten(),dtrain,nrounds=2000)
+# office_test$Pred.Base <- predict(xgb.model.Base,dtest)
+# 
+# 
+# ### FASTING
+# office_train.Fasting <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
+# 
+# office_train.makeX <- makeX(office_train.Fasting)
+# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+# 
+# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+# 
+# 
+# office_test.Fasting <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
+# 
+# 
+# office_test.makeX <-  makeX(office_test.Fasting)
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# 
+# 
+# xgb_tuned.Fasting <- caret::train(
+#   method = "xgbTree",
+#   x= office_train.makeX,
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# 
+# xgb.model.Fasting<- xgboost::xgb.train(params=xgb_tuned.Fasting$bestTune %>% flatten(),dtrain,nrounds=2000)
+# office_test$Pred.Fasting <- predict(xgb.model.Fasting,dtest)
+# 
+# 
+# ### URINE
+# office_train.Urine <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+# 
+# office_train.makeX <- makeX(office_train.Fasting)
+# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+# 
+# 
+# office_test.Urine <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
+# 
+# 
+# office_test.makeX <-  makeX(office_test.Urine)
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# 
+# xgb_tuned.Urine <- caret::train(
+#   method = "xgbTree",
+#   x= office_train.makeX,
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# 
+# xgb.model.Urine.Var<- xgboost::xgb.train(params=xgb_tuned.Urine$bestTune %>% flatten(),dtrain,nrounds=2000)
+# office_test$Pred.Urine.Var <- predict(xgb.model.Urine.Var,dtest)
+# 
+# 
+# 
+# ### SDOH
+# office_train.SDOH <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH)))
+# office_train.makeX <- makeX(office_train.SDOH)
+# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+# dtrain <- xgb.DMatrix(data = makeX(office_train.SDOH), label = label.train)
+# 
+# 
+# 
+# office_test.makeX <-  makeX(office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH))))
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# xgb_tuned.SDOH <- caret::train(
+#   method = "xgbTree",
+#   x= office_train.makeX,
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# xgb.model.SDOH<- xgboost::xgb.train(params=xgb_tuned.SDOH$bestTune %>% flatten(),dtrain,nrounds=2000)
+# 
+# xgb.model.SDOH$feature_names[!xgb.model.SDOH$feature_names %in% colnames(dtest)]
+# 
+# office_test$Pred.SDOH <- predict(xgb.model.SDOH,dtest)
+# 
+# 
+# 
+# 
+# ### VAR 2 --- this is now a mini version of Full based on the results from Full
+# 
+# office_train.Var2 <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+# 
+# office_train.makeX <- makeX(office_train.Var2)
+# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+# 
+# office_test.Var2 <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
+# 
+# office_test.makeX <-  makeX(office_test.Var2)
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# xgb_tuned.Var2 <- caret::train(
+#   method = "xgbTree",
+#   x= office_train.makeX,
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# 
+# xgb.model.Var2<- xgboost::xgb.train(params=xgb_tuned.Var2$bestTune %>% flatten(),dtrain,nrounds=2000)
+# office_test$Pred.Var2 <- predict(xgb.model.Var2,dtest)
+# 
+# 
+# 
+# ### FIB-4
+# office_train.FIB4 <- office_train %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+# 
+# office_train.makeX <- makeX(office_train.FIB4)
+# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+# 
+# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+# 
+# 
+# office_test.FIB4 <- office_test %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
+# 
+# 
+# 
+# office_test.makeX <-  makeX(office_test.FIB4)
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+# 
+# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+# 
+# 
+# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+# 
+# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+# 
+# 
+# 
+# xgb_tuned.FIB4 <- caret::train(
+#   method = "xgbTree",
+#   x= office_train.makeX,
+#   y = label.train,
+#   tuneLength = 1,
+#   trControl = train_control,
+#   tuneGrid = tune_grid.mod,
+#   metric = "RMSE",
+#   weights = weight.sample.train.norm,
+#   verbose=TRUE
+# )
+# 
+# 
+# xgb.model.FIB4<- xgboost::xgb.train(params=xgb_tuned.FIB4$bestTune %>% flatten(),dtrain,nrounds=2000)
+# office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
+
+### MIN MODEL
+
+
+office_train.MIN <- office_train %>% select(all_of(c(Var.MIN )))
+
+office_train.makeX <- makeX(office_train.MIN)
+dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+
+office_test.MIN <- office_test %>% select(all_of(c(Var.MIN )))
+
+office_test.makeX <-  makeX(office_test.MIN)
+office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+
+#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
+
+office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+
+dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
+
+xgb_tuned.MIN <- caret::train(
+  method = "xgbTree",
+  x= office_train.makeX,
+  y = label.train,
+  tuneLength = 1,
+  trControl = train_control,
+  tuneGrid = tune_grid.mod,
+  metric = "RMSE",
+  weights = weight.sample.train.norm,
+  verbose=TRUE
+)
+
+
+xgb.model.MIN<- xgboost::xgb.train(params=xgb_tuned.MIN$bestTune %>% flatten(),dtrain,nrounds=2000)
+office_test$Pred.MIN <- predict(xgb.model.MIN,dtest)
+
+
+### END MODELS
+office_train$two <- label.train
+office_train$sample.ogtt.weight <-  weight.sample.train
+
+
+office_test$two <- label.test
+office_test$sample.ogtt.weight <-  weight.sample.test
+
+### This is a Rda of the office_test data frame 
+#file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2024.11.22.Rda'
+save(office_train,file=file.office.train)
+
+### This is a Rda of the office_test data frame 
+
+#file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2024.11.22.Rda'
+save(office_test,file=file.office.test)
+
+### This is a list of all the models in question
+#list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2,xgb.model.MIN)
+list.models <- list(xgb.model.full,xgb.model.MIN)
+#file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb.models"
+save(list.models,file=file.list.models)
+
+#office_test$Pred.26 <- predict(xgb.model.26,dtest)
+```
+```{r}
+# 
+# office_train$two <- label.train
+# office_train$sample.ogtt.weight <-  weight.sample.train
+# 
+# 
+# office_test$two <- label.test
+# office_test$sample.ogtt.weight <-  weight.sample.test
+# 
+# office_test$Pred.Base <- office_test$Pred.Full
+# office_test$Pred.SDOH <- office_test$Pred.Full
+# office_test$Pred.Fasting <- office_test$Pred.Full
+# office_test$Pred.Urine.Var <- office_test$Pred.Full
+# office_test$Pred.Var2 <- office_test$Pred.Full
+# office_test$Pred.FIB4 <- office_test$Pred.Full
+
+
+```
