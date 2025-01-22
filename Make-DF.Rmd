@@ -15,7 +15,7 @@ The point of this file is to make the DF file that is then run by the "NHANES-XG
 knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
 options(prType='html')
 
-
+### Uncomment this if the first time, otherwise leave commented
 #install.packages('nhanesA')
 #install.packages('foreign')
 library(foreign)
@@ -46,8 +46,12 @@ letters <- c('D','E','F','G','H','I')
 years <- c(2005,2007,2009,2011,2013,2015)
 
 
+# Make sure you have a good internet connection for this 
+
+### These are the questionnaires/ datasets that are important from NHANES that are consistent across the years in question
 vars.no.adjust <- c('DEMO','CBC','ALQ','BPQ','DIQ','MCQ','BPX','GHB','DXXAG','BMX','SLQ','MGX','BIX','HEPA','HEPB_S','HEPC','HEPE')
 
+### These are the datasets that need modification from year to year - this distinction is important for the generate-output file but otherwise not meaningful
 vars.need.adjust <- c('OGTT','BIOPRO','GLU','INS','HEPBD','ALB_CR')
 
 cols <- c('BMIRECUM','MCQ240D','BPAEN1','MCQ240L','MCQ240B','DIQ175A','DMDHHSIZ','DMDFMSIZ','DMDHHSZA','DMDHHSZB','DMDHHSZE')
@@ -58,7 +62,7 @@ no.var.let <- c('DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D','MGX_E','MGX_F
 ## NEED TO MAKE SURE FIRST ARGUMENT ACTUALLY EXISTS, OTHERWISE THIS ALL BREAKS
 
 
-vars = c('DXX')
+vars <- c(vars.no.adjust,vars.need.adjust)[1:3]
 for (i in 1:length(vars)){
   j = 1
   var <- vars[i]
