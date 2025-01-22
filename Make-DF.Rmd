@@ -62,7 +62,7 @@ no.var.let <- c('DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D','MGX_E','MGX_F
 ## NEED TO MAKE SURE FIRST ARGUMENT ACTUALLY EXISTS, OTHERWISE THIS ALL BREAKS
 
 
-vars <- c(vars.no.adjust,vars.need.adjust)[1:3]
+vars <- c(vars.no.adjust,vars.need.adjust)
 for (i in 1:length(vars)){
   j = 1
   var <- vars[i]
