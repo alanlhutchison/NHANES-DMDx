@@ -1,0 +1,2124 @@
+---
+title: "NHANES-XGBOOST-graphs"
+author: "alanlhutchison"
+date: "2025-02-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+## XGBOST CODE
+
+This code takes the DF file and renames and winnows down the features, then applies various XGBOOST models to generate output figures for the NHANES DxDM manuscript.
+
+```{r Libraries, include=FALSE,echo=FALSE}
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+
+#install.packages('nhanesA')
+#install.packages('foreign')
+#install.packages("xgboost")
+#install.packages("caret")
+#install.packages("dplyr")
+
+library(xgboost)
+library(caret)
+library(dplyr)
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+library(Hmisc)
+library(glmnet)
+library(tidymodels)
+library(data.table)
+
+```
+
+## Including Plots
+
+You can also embed plots, for example:
+
+```{r pressure, echo=FALSE}
+
+load('df.master-2024.08.18.Rda')
+```
+
+
+
+
+```{r Making DF.MASTER}
+
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+
+
+df <- df.master %>% 
+  mutate(LBXIN = if_else(!is.na(LBXIN.x),LBXIN.x,LBXIN.y )) %>% select(-LBXIN.x) %>% select(-LBXIN.y) %>% 
+  mutate(WTSAF2YR = if_else(!is.na(WTSAF2YR.x),WTSAF2YR.x,WTSAF2YR.y ))  %>% select(-WTSAF2YR.x) %>% select(-WTSAF2YR.y) %>% 
+  
+  ### We are going to update everything match 2015-2016 as best we can
+  mutate(
+  ### INS adjustment
+  #### Insulin (2011 & post-2011) = 0.8868*Insulin (pre-2011) + [0.0011*Insulin (pre-2011)**2] – 0.0744.  
+  LBXIN = if_else(Year < 2011, 0.8868*LBXIN + (0.0011*LBXIN**2) - 0.0744, LBXIN )) %>% 
+  mutate(
+  #### Insulin (Tosoh-equivalent 2013 & post-2013) = 10**(1.024*log10(Roche insulin 2011-2012) – 0.0802)
+  LBXIN = if_else(Year < 2013, 10**(1.024*log10(LBXIN) - 0.0802),LBXIN),
+  ### GLU adjustment
+  ### Y (Roche ModP 2007) = X (Roche 911 2005-2006) + 1.148, n=143, r=0.997, slope was not significant.
+  LBXGLU = if_else(Year < 2007, LBXGLU + 1.148, LBXGLU),
+  LBXGLT = if_else(Year < 2007, LBXGLT + 1.148, LBXGLT),
+  ## FPG
+  ) %>% 
+  mutate(
+  ### GLU Forward: Y (C311 2015-2016) = 1.023 (95%CI: 1.014 – 1.032) * X (C501 2013-2014) - 0.5108 (95%CI: -1.441 – 0.4197)
+  LBXGLU = if_else(Year < 2015, 1.023 * LBXGLU - 0.5108, LBXGLU  ),
+  LBXGLT = if_else(Year < 2015, 1.023 * LBXGLT - 0.5108, LBXGLT ),
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR),
+  ### UCr adjustment for < 2007,
+  #### Urine Creatinine < 75: Y(adjusted Creatinine) = [1.02*sqrt(X, unadjusted Creatinine) – 0.36]**2
+  #### Urine Creatinine 75 to < 250: Y(adjusted Creatinine) = [1.05*sqrt(X, unadjusted Creatinine) – 0.74]**2
+  #### Urine Creatinine >=250: Y(adjusted Creatinine) = [1.01*sqrt(X, unadjusted Creatinine) – 0.10]**2
+  URXUCR = if_else(Year < 2007,
+                   if_else(URXUCR < 75, (1.02*sqrt(URXUCR) - 0.36)**2,
+                           if_else(URXUCR >= 250,
+                                   (1.01*sqrt(URXUCR) - 0.10)**2,
+                                   (1.05*sqrt(URXUCR) - 0.74)**2 )
+                          ),
+                   URXUCR)
+  ) %>% 
+
+  rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
+         sample.interview.weight = WTINT2YR,
+         sample.mec.weight = WTMEC2YR,
+                           ## Alcohol survey
+                           alc.one.per.month = ALQ101, alc.12.lifetime = ALQ110, alc.often.year = ALQ120Q, alc.often.year.unit = ALQ120U,
+                           alc.per.day = ALQ130, alc.4.5.per.day = ALQ141Q, alc.4.5.per.day.unit = ALQ141U, alc.4.5.day.ever = ALQ151, alc.4.5.2.hours = ALQ160, 
+              ## Urine
+              u.alb = URXUMA,u.cr = URXUCR, # urine albumin, urine creatinine
+              ## Anthropometrics
+
+             # htn.ever = BPQ020, htn.2times = BPQ030, htn.age = BPD035, htn.pharm = BPQ040A, htn.taking.meds = BPQ050A, 
+              ## HLD questinos
+              hld.ever = BPQ080, hld.checked = BPQ060, hld.last = BPQ070, hld.pharm = BPQ090D, hld.taking.meds = BPQ100D,
+              ## CBC
+              wbc = LBXWBCSI, rbc = LBXRBCSI, hg = LBXHGB, mcv = LBXMCVSI, plt = LBXPLTSI, mpv = LBXMPSI, # WBC, RBC, Hg, MCV, PLT, MPV
+              ## CMP
+              alt = LBXSATSI, alb = LBXSAL, alp = LBXSAPSI, ast = LBXSASSI, # ALT, albumin, ALP, AST
+              ## CMP
+              bicarb = LBXSC3SI, bun = LBXSBU, chlor = LBXSCLSI, choles = LBXSCH, # Bicarb,  BUN, Chlor, Chol serum
+              ## CMP
+              cpk = LBXSCK, cr = LBXSCR, ggt = LBXSGTSI, gluc = LBXSGL, # CPK, Creat, GGT, Gluc
+              ## CMP
+              iron = LBXSIR, ldh = LBXSLDSI, phos = LBXSPH, potas = LBXSKSI, #Iron, LDH, Phos, K
+              ## CMP
+              na = LBXSNASI, tbili = LBXSTB, cal = LBXSCA, tprot = LBXSTP, # Na, TBili, Cal, TProt
+              tgy = LBXSTR, urica = LBXSUA, # TGY, UricAcid
+              ## DEXA
+              #dexa.valid = DXAEXSTS, 
+              dexa.body = DXXAGST,  # valid DEXA==1, valid android/gynoid DEXA==1
+              android.fat.mass = DXXANFM, android.lean.mass = DXXANLM, android.total.mass = DXXANTOM, gynoid.fat.mass = DXXGYFM, gynoid.lean.mass = DXXGYLM,
+              gynoid.total.mass = DXXGYTOM, android.to.gynoid = DXXAGRAT, android.percent.fat = DXXAPFAT, gynoid.percent.fat = DXXGPFAT, subcut.fat.area = DXXSATA, subcut.fat.mass = DXXSATM, sub.fat.vol = DXXSATV, tot.abd.fat.area = DXXTATA, total.abd.fat.mass = DXXTATM, total.abd.fat.vol = DXXTATV, visc.adi.tissue.area = DXXVFATA, visc.adi.tissue.mass = DXXVFATM, visc.adi.tissue.vol = DXXVFATV, 
+              ## Blood markers
+              #ferritin = LBXFER, 
+             #folate = LBDRFO, # Ferritin**, Folate,
+              fpg = LBXGLU, # FPG**, 
+              ## Hepatitis C
+              HepC.VL = LBXHCR, 
+              HepC.Geno= LBXHCG, # HepC CL, Hep C genotype
+              insulin = LBXIN, # Insulin
+              ## Vital Signs
+              pulse = BPXPLS, reg.iregg = BPXPULS, sbp1 = BPXSY1, dbp1 = BPXDI1, sbp2 = BPXSY2, dbp2 = BPXDI2,  sbp3=BPXSY3,dbp3=BPXDI3,# Pulse, regular / irregular, SBP1, DBP1, SBP2,DBP2
+              ## Cholesterol
+              #hdl = LBDHDD, 
+              #t.chol = LBXTC, #HDL, serum total cholesterol,
+              ## Weight Survey
+              dr.told.weight = MCQ365A, dr.told.exercise = MCQ365B, dr.told.salt = MCQ365C, dr.told.diet=MCQ365D,
+              weight.control.now=MCQ370A,exercise.increase.now=MCQ370B,salt.reducing.now=MCQ370C,fat.reduce.now=MCQ370D, # diabetes questionaire
+              a1c = LBXGH, #glycohemoglobin
+              ## Viral 
+              Hep.A = LBXHA, # Hep A
+              HepB.cAb = LBXHBC, Hep.sAg = LBDHBG, HepD = LBDHD, # HepB cAb, HepB sAg, HepD
+              HepB.sAb = LBXHBS, # HepB sAb
+              HepE.G = LBDHEG, HepE.M = LBDHEM, # HepE IgG, IgM
+              #HSV1.Ab = LBXHE1, HSV2.Ab = LBXHE2, # HSV1 Ab, HSV2 Ab
+              #HIV = LBXHIVC, HIV1 = LBXHIV1, HIV2 = LBXHIV2, HIV.NAT = LBXHNAT, # HIV
+              ## Liver survey
+              Liver.Ever = MCQ160L, Liver.Still =  MCQ170L, Liver.Age = MCQ180L, # Any liver condition, do you still have liver condition, age when you were told you had liver condition
+              sample.ogtt.weight = WTSOG2YR, two = LBXGLT,  # subsample weight, two hour glucose (mg/dL),
+              two.mmol = LBDGLTSI, admin.time = GTDSCMMN, # two hour glucose (mmol/L), adiminstration time,
+              ogtt.time.gluc.chall = GTDDR1MN, ogtt.time.gluc.ogtt = GTDBL2MN, # time from fast glucose and challenge,Time from fasting glucose & OGTT (min),
+              ogtt.time.total=GTDDR2MN,ogtt.amount = GTXDRANK, ogtt.incomplete = GTDCODE,  # Time from glucose challenge & OGTT(min),Amount of glucose challenge drank, Incomplete OGTT Comment Code
+              #transferr = LBXTFR, # Transferrin receptor (mg/L)
+              sample.fasting.weight = WTSAF2YR, #Fasting Subsample 2 Year MEC Weight
+              #tryg = LBXTR, ldlc = LBDLDL, # Triglyceride (mg/dL), LDL-cholesterol (mg/dL)
+              #total.testosterone = LBXTST, testosterone.comment = LBDTSTLC, estradiol = LBXEST, estradiol.comment = LBDESTLC, shbg = LBXSHBG, shbg.comment = LBDSHGLC, # Testosterone, total (ng/dL), Testosterone comment code,  Estradiol (pg/mL), Estradiol Comment Code, SHBG (nmol/L), SHBG Comment Code
+dm.told = DIQ010, dm.age=DID040, pdm.told = DIQ160, dm.told.ever = DIQ170, dm.feel.risk=DIQ172,
+dm.famhx = DIQ175A, dm.risk.overweight = DIQ175B, dm.risk.age = DIQ175C, dm.risk.diet=DIQ175D,
+dm.risk.race = DIQ175E, dm.risk.weight = DIQ175F, dm.risk.physc = DIQ175G, dm.risk.htn = DIQ175H, dm.risk.hyper = DIQ175I, dm.risk.hld = DIQ175J, dm.risk.hypo = DIQ175K, dm.risk.hunger=DIQ175L, dm.risk.numb = DIQ175M, dm.risk.blur = DIQ175N, dm.risk.fatigue = DIQ175O, dm.risk.anyone = DIQ175P, dm.risk.doctor = DIQ175Q, dm.risk.other= DIQ175Q, dm.risk.gest = DIQ175S, dm.risk.urine = DIQ175T, dm.risk.thirst = DIQ175U, dm.risk.crave = DIQ175V, dm.risk.meds = DIQ175W, dm.risk.PCOS=DIQ175X, dm.test.3yrs = DIQ180, dm.taking.insulin.now = DIQ050, dm.insulin.how.long = DID060, dm.insulin.length.unit = DIQ060U,
+dm.taking.pills.now = DIQ070, dm.saw.dr.how.long = DIQ230, dm.dr = DIQ240, dm.dr.past.year = DID250, dm.check.freq = DID260, dm.check.freq.unit = DIQ260U, dm.check.a1c = DIQ275, dm.last.A1c = DIQ280, dm.a1c.goal = DIQ291, dm.recent.sbp = DIQ300S, dm.recent.dbp = DIQ300D, dm.sbp.goal = DID310S, dm.dbp.goal = DID310D, dm.recent.ldl = DID320, dm.ldl.goal = DID330, dm.dr.check.sores = DID341, dm.self.check.feet = DID350, dm.self.check.feet.units =DIQ350U,dm.last.pupils = DIQ360, dm.retin = DIQ080,
+CHF.ever = MCQ160B, CHF.age = MCQ180B, CAD.ever = MCQ160C, CAD.age = MCQ180C, anigina.ever = MCQ160D, angina.ga = MCQ180D, HA.ever = MCQ160E, HA.age = MCQ180E, stroke.ever = MCQ160F, stroke.age = MCQ180F, thyroid.ever = MCQ160M, thyroid.still = MCQ170M, thyroid.age = MCQ180M, jaundice.ever = MCQ203, jaundice.age = MCQ206, cancer.ever = MCQ220,cancer.type.a = MCQ230A, cancer.type.b = MCQ230B, cancer.type.c = MCQ230C, cancer.type.d = MCQ230D,
+relative.HA = MCQ300A, relative.asthma=MCQ300B, relative.dm = MCQ300C,
+#vigorous.work.yes=PAQ605, days.vigorous.work=PAQ610, min.vigorous.work=PAD615, mod.work.yes=PAQ620,days.mod.work=PAQ625,min.mod.work=PAD630,
+#vigorous.rec.yes=PAQ650,days.vig.rec=PAQ655,min.vig.rec=PAD660,
+#mod.rec.yes=PAQ665,days.mod.rec=PAQ670,min.mod.rec=PAD675,
+
+### Body Measures
+Weight = BMXWT,
+Height.Stand = BMXHT,
+BMI = BMXBMI,
+Arm.Circ = BMXARMC,
+Waist.Circ = BMXWAIST,
+Thigh.Circ = BMXTHICR,
+Triceps.Skin = BMXTRI,
+
+    # Sleep Measures
+     Usual.Sleep.Time.Week= SLQ300,
+     Usual.Wake.Time.Week = SLQ310,
+     
+     #Sleep.Hours.Week= SLD012,
+     #Usual.Sleep.Time.Weekend = SLQ320,
+     #Usual.Wake.Time.Weekend = SLQ330,
+     #Sleep.Hours.Weekend = SLD013,
+     #Snore.Often = SLQ030,
+     #Snort.Apnea.Often = SLQ040,
+     #Told.Dr.Trouble.Sleeping = SLQ050,
+     #Overly.Sleepy.Often = SLQ120,
+
+   How.Much.Sleep.Hr = SLD010H,
+   How.Long.Fall.Asleep.Min = SLD020M,
+   Often.Snore = SLQ030,
+   Often.Snort.Apnea = SLQ040,
+   Dr.Told.Sleep.Disorder = SLQ060,
+   Told.Sleep.Apnea = SLQ070A,
+   Told.Insomnia = SLQ070B,
+   Told.Restless.Legs= SLQ070C,
+   Told.Sleep.Disorder.Other = SLQ070D,
+   How.Often.Trouble.Falling.Asleep = SLQ080,
+   How.Often.Wake.Up.At.Night = SLQ090,
+   How.Often.Wake.Too.Early = SLQ100,
+   How.Often.Feel.Unrested = SLQ110,
+   How.Often.Feel.Sleepy = SLQ120,
+   How.Often.Not.Enough.Sleep = SLQ130,
+   How.Often.Sleeping.Pills = SLQ140,
+   How.Often.Leg.Jerks = SLQ150,
+   How.Often.Leg.Cramp = SLQ160,
+   Difficulty.Concentrating.When.Tired = SLQ170,
+   Difficulty.Remembering.When.Tired = SLQ180,
+   Difficulty.Eating.When.Tired = SLQ190,
+   Difficulty.Hobby.When.Tired = SLQ200,
+   Difficulty.Getting.Things.Done = SLQ210,
+   Difficulty.Finance.Tired = SLQ220,
+   Difficulty.Work.Tired = SLQ230,
+   Difficulty.Phone.Tired = SLQ240,
+   Sleep.Hours = SLD012,
+
+  Grip.Test.Status = MGDEXSTS,
+  Surgery.Hands.Ever = MGD050,
+  Surgery.Which.Hand = MGD060,
+  Recent.Pain.R.Hand = MGQ070,
+  Cause.Pain.R.Hand = MGQ080,
+  Pain.R.Hand.Worse = MGQ090,
+  Recent.Pain.L.Hand = MGQ100,
+  Cause.Pain.L.Hand = MGQ110,
+  Pain.L.Hand.Worse = MGQ120,
+  Dom.Hand = MGD130,
+  Angle.90.Index.Finger = MGQ90DG,
+  Testing.Position = MGDSEAT,
+  Hand.Practice = MGAPHAND,
+  Hand.Begin = MGATHAND,
+  Grip.Hand.1.Test.1.kg = MGXH1T1,
+  Grip.Hand.1.Test.1.Effort = MGXH1T1E,
+  Grip.Hand.2.Test.1.kg = MGXH2T1,
+  Grip.Hand.2.Test.1.Effort = MGXH2T1E,
+  Grip.Hand.1.Test.2.kg = MGXH1T2,
+  Grip.Hand.1.Test.2.Effort = MGXH1T2E,
+  Grip.Hand.2.Test.2.kg = MGXH2T2,
+  Grip.Hand.2.Test.2.Effort = MGXH2T2E,
+  Grip.Hand.1.Test.3.kg = MGXH1T3,
+  Grip.Hand.1.Test.3.Effort = MGXH1T3E,
+  Grip.Hand.2.Test.3.kg = MGXH2T3,
+  Grip.Hand.2.Test.3.Effort = MGXH2T3E,
+  Comb.Grip.Strength.kg = MGDCGSZ
+) %>% 
+  ### COMBINE LANGUAGES
+ mutate(SIALANG=as.integer(SIALANG=='Spanish'),MIALANG=as.integer(MIALANG=='Spanish'),FIALANG=as.integer(FIALANG=='Spanish')) %>% rowwise() %>%  mutate(LANG=sum(SIALANG,MIALANG, FIALANG,na.rm=TRUE)) %>% select(-c(SIALANG,MIALANG,FIALANG)) %>% ungroup() %>% 
+  mutate(Sleep.Hours = if_else(is.na(Sleep.Hours),How.Much.Sleep.Hr,Sleep.Hours)) %>% select(-How.Much.Sleep.Hr) %>% 
+  ### COMBINE BLOOD PRESSURE
+  mutate(SBP = ( f.na.to.0(sbp1)+f.na.to.0(sbp2)+f.na.to.0(sbp3)) / (f.na.or.low(sbp1) + f.na.or.low(sbp2) + f.na.or.low(sbp3) ) )    %>% mutate(DBP = ( f.na.to.0(dbp1)+f.na.to.0(dbp2)+f.na.to.0(dbp3)) / ( f.na.or.low(dbp1) + f.na.or.low(dbp2) + f.na.or.low(dbp3) ) )  %>% 
+  select(-sbp1,-sbp2,-dbp1,-dbp2,-sbp3,-dbp3) %>% 
+  ### FIX WEIGHTS
+  mutate(sample.fasting.weight = sample.fasting.weight / 6,
+         sample.ogtt.weight = sample.ogtt.weight / 6,
+         sample.interview.weight = sample.interview.weight / 6,
+         sample.mec.weight = sample.mec.weight / 6) %>%  # combining across 6 cycles
+select(-Year.x,-Year.y)  %>%  
+  ### Naming variables based on LASSO identification
+  rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>% 
+  ### Excluding labels that would be artefactual or duplicative
+
+  select(-Data.Release.Cycle,) %>% 
+  select(-c(TProt.g.L,UrineAlb.mg.L,Tbili.umol,phosphorus.mmol,triglycerides.mmol,glucose.mmol,BP.Arm,Seg.Neut.num,gluc,UricA)) %>% 
+  rename(Osmolality=LBXSOSSI,Num.Family=DMDFMSIZ,Arm.Length=BMXARML,BPCuff.Max.Inflation=BPXML1,Pulse.Site=BPXPTY,Globulin=LBXSGB,BP.Enhancement.3=BPAEN3,UpperLeg.Length=BMXLEG,TransfusionEver=MCQ092,Eos.Num=LBDEONO,BP.Enhancement.2=BPAEN2,CitizenStatus=DMDCITZN,Baso.Num=LBDBANO,MCHC=LBXMC,Chol.mmol=LBDSCHSI,fpg.mmol=LBDGLUSI,Calcium.mmol=LBDSCASI,UrineCr.mmol=URXCRS,Lympho.Num = LBDLYMNO,Mono.num=LBDMONO,Told.Asthma = MCQ010,BUN.mmol=LBDSBUSI,Baso.Perc=LBXBAPCT,Globulin.g.L=LBDSGBSI, BP.Ever.Told.High = BPQ020, Sleep.Ever.Told.Poor = SLQ050, ,Cr.umol = LBDSCRSI) %>% 
+  select(-c(Calcium.mmol,Chol.mmol,fpg.mmol,Baso.Num,Eos.Num,BP.Enhancement.2,Pulse.Site,BP.Enhancement.3,sample.interview.weight,BUN.mmol,sample.mec.weight,Globulin.g.L,Arm.Length,UpperLeg.Length)) %>% 
+  ### PROXY AND INTERPRETER
+  ### PROXY and INTERPRETER 
+  mutate(Proxy.Used = f.yes1.no0(Proxy.Used),Proxy.Mec.Used=f.yes1.no0(Proxy.Mec.Used),Interpreter.SP.interview=f.yes1.no0(Interpreter.SP.interview),Interpreter.Used=f.yes1.no0(Interpreter.Used),Interpreter.MIA=f.yes1.no0(Interpreter.MIA),FIAPROXY=f.yes1.no0(FIAPROXY)) %>% rowwise() %>% mutate(PROXY=sum(Proxy.Used,Proxy.Mec.Used,na.rm=TRUE),INTERPRETER=sum(Interpreter.Used,Interpreter.MIA,Interpreter.SP.interview,na.rm=TRUE)) %>% ungroup()  %>% mutate(PROXY=as.integer(PROXY>0),INTERPRETER=as.integer(INTERPRETER>0)) %>% 
+  select(-c(Proxy.Used,Proxy.Mec.Used,Interpreter.SP.interview,Interpreter.Used,Proxy.Mec.Used,Interpreter.Used,Interpreter.MIA,FIAPROXY,sample.fasting.weight,Head.Household.Age,Masked.Var.Pseduocode)) %>% 
+  rename(Masked.Var.Pseduo.Strat = SDMVSTRA,Enhance.BP1 = BPAEN1) %>% 
+  select(-c(Masked.Var.Pseduo.Strat,Enhance.BP1,two.mmol,UrineCr.mmol,Cr.umol,Time.of.Survey)) %>% rename(RaceEth=RIDRETH1,Marriage.Status=DMDHRMAR,EduLevel=DMDHREDU) %>% 
+  rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>% 
+  select(-c(SEQN,BMI,BPCuff.Max.Inflation,iron.umol,Lympho.Num,alb.g.L,BMDSTATS)) %>% 
+  rename(Ever.Told.Overweight = MCQ080, Cuff.Size=BPACSZ) %>% 
+  select(-c(Cuff.Size,RIDSTATR,Gender.HeadHousehold,INTERPRETER,PROXY,Mono.num,Num.Family)) %>% 
+  ### Don't Know to Don't know
+  mutate(Marriage.Status=if_else(Marriage.Status=="Don't Know","Don't know",Marriage.Status)) %>% 
+  mutate(Anemia.Treatment=if_else(Anemia.Treatment=="no","No",Anemia.Treatment)) %>% 
+  mutate(EduLevel=if_else(EduLevel=="Don't Know","Don't know",EduLevel)) 
+#rename()
+#select(-c())
+
+
+#df %>% select(vigorous.work.yes, days.vigorous.work, min.vigorous.work,mod.work.yes,days.mod.work,min.mod.work,vigorous.rec.yes,days.vig.rec,min.vig.rec,mod.rec.yes,days.mod.rec,min.mod.rec) %>% 
+ # mutate(Phys.Act = if_else(vigorous.work.yes==1,days.vigorous.work*min.vigorous.work,0) +
+  #         if_else(mod.work.yes==1,days.mod.work*min.mod.work,0) + 
+   #        if_else(vigorous.rec.yes==1,days.vig.rec*min.vig.rec,0) + 
+    #       if_else(mod.rec.yes==1,days.mod.rec*min.mod.rec,0) )
+```
+
+
+
+```{r}
+dir.string <-"~/Documents/NHANES15-16/"
+filter.string <- "all"
+# filter.string <- "alb<4.1"
+# filter.string <- "Cr>1"
+#filter.string <- "FIB4>2"
+# filter.string <- "FIB4>1.3"
+# filter.string <- "Age>50"
+# filter.string <- "BMI>25"
+# filter.string <- "BMI>30"
+# filter.string <- "BMI>35"
+# filter.string <- "SBP>130"
+# filter.string <- "ggt>40"
+# filter.string <- "WC>100"
+# filter.string <- "WC>110"
+
+
+df.small <- df %>% drop_na(a1c,two,sample.ogtt.weight)
+
+file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned.29_2025.02.06.Rda")
+#file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_",filter.string,"_2025.02.06.Rda")
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_",filter.string,"_2024.12.12.Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_",filter.string,"_2024.12.12.Rda")
+file.list.models <- paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-All-xgb.models")
+
+file.ROCs=paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-All_ROCs.bmp" )
+file.importance.plots = paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-ImportancePlots.bmp" )
+file.dca.all = paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-DCA-all.bmp" )
+file.dca.fib4 = paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-DCA_FIB4.bmp" )
+
+file.dca.min = paste0(dir.string,"NHANES-A1c-wIns_",filter.string,"-DCA_min-set.bmp" )
+
+
+xgb_tuned.full <- load(file.xgb_tuned.full)
+
+load(file=file.office.train) ### makes office.train
+load(file=file.office.test) ### makes office.test
+load(file=file.list.models) # makes list.models
+#list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2)
+```
+
+```{r}
+print('Age > 60')
+df.small %>% filter(Age>60,Year<2015) %>% nrow() 
+df.small %>% filter(Age>60,Year>2014) %>% nrow() 
+
+print('FIB-4 > 2.67')
+df.small %>% mutate(FIB4 = Age/plt*ast/sqrt(alt)) %>% filter(FIB4>2.67,Year<2015) %>% nrow() 
+df.small %>% mutate(FIB4 = Age/plt*ast/sqrt(alt)) %>% filter(Year>2014,FIB4>2.67) %>% nrow() 
+
+print('BMI > 30')
+df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100)  %>%  filter(BMI>30,Year<2015) %>% nrow() 
+df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100)  %>%  filter(BMI>30,Year>2014) %>% nrow() 
+
+print('SBP > 140')
+df.small %>% filter(SBP>140,Year<2015) %>% nrow() 
+df.small %>% filter(SBP>140,Year>2014) %>% nrow() 
+
+print('eGFR < 60')
+df.small %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)
+                     )   %>% filter(eGFR < 60,Year<2015) %>% nrow()
+
+df.small %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)
+                     )   %>% filter(eGFR < 60,Year >2014) %>% nrow()
+
+
+```
+
+
+
+```{r}
+df.imp <- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% select(Feature,Gain)  %>% mutate(Gain=round(Gain,3)) %>% head(20) %>%
+  mutate(Sum=sum(Gain)) %>%
+  mutate(Feature=str_replace_all(Feature,'fpg','Fasting Plasma Glucose')) %>% 
+  mutate(Feature=str_replace_all(Feature,'a1c','Hemoglobin A1c')) %>%
+  mutate(Feature=str_replace_all(Feature,'tgy','Triglycerides')) %>%
+  mutate(Feature=str_replace_all(Feature,'SBP','Systolic Blood Pressure')) %>%
+  mutate(Feature=str_replace_all(Feature,'u.alb','Urine Albumin')) %>%
+  mutate(Feature=str_replace_all(Feature,'Height.Stand','Height'))%>%
+  mutate(Feature=str_replace_all(Feature,'insulin','Insulin'))%>%
+  mutate(Feature=str_replace_all(Feature,'Seg.Neut.perc','% Segmented Neutrophils'))%>%
+  mutate(Feature=str_replace_all(Feature,'u.cr','Urine Creatinine'))%>%
+  mutate(Feature=str_replace_all(Feature,'Lymph.Perc','% Lymphocytes'))%>%
+  mutate(Feature=str_replace_all(Feature,'Poverty.Ratio','Poverty Ratio'))%>%
+  mutate(Feature=str_replace_all(Feature,'pulse','Pulse'))%>%
+  mutate(Feature=str_replace_all(Feature,'wbc','White Blood Cell Count'))%>%
+  mutate(Feature=str_replace_all(Feature,'choles','Cholesterol'))%>%
+  mutate(Feature=str_replace_all(Feature,'^Waist.Circ','Waist Circumference'))%>%
+  mutate(Feature=str_replace_all(Feature,'^ast','AST'))%>%
+  mutate(Feature=str_replace_all(Feature,'^DBP','Diastolic Blood Pressure')) %>% 
+  mutate(Feature=str_replace_all(Feature,'^ggt','GGT')) %>% 
+  mutate(Feature=str_replace_all(Feature,'^cr','Creatinine')) %>%  
+  mutate(Feature=str_replace_all(Feature,'^iron','Iron')) %>% 
+  mutate(Feature=str_replace_all(Feature,'^plt','Platelets')) %>%  
+  mutate(Feature=factor(Feature,levels=Feature))
+
+p <- df.imp %>%   ggplot() + 
+  geom_col(aes(x=Feature,y=Gain)) +  ylab("Importance") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) +
+  theme(text = element_text(size = 11))
+
+print(p)
+  
+ggsave('Feature-Importance.png', p, width = 4, height = 3, units = "in")
+
+
+knitr::kable(df.imp %>% select(Feature,Gain))
+
+
+plot.import.full<- df.imp %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Full Model",subtitle="Top 20 features") + theme(plot.title = element_text(hjust = 0.5),plot.subtitle = element_text(hjust = 0.5))
+print(plot.import.full)
+
+ggsave('~/Dropbox/NHANES manuscript/Feature-Importance.png', plot.import.full, width = 4, height = 3, units = "in")
+
+```
+
+```{r}
+library(htmlTable)
+library(Gmisc)
+```
+
+
+```{r}
+features <- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full)%>% arrange(desc(Gain)) %>% head(20) %>% pull(Feature) 
+df.desc.stats <-df.small %>% select(features,Year) %>% mutate(Year.2015 = ifelse(Year > 2013,"2015-2016","2005-2014")) %>% 
+  rename_with(~ str_replace_all(., c(
+    'fpg' = 'Fasting Plasma Glucose',
+    'a1c' = 'Hemoglobin A1c',
+    'tgy' = 'Triglycerides',
+    'SBP' = 'Systolic Blood Pressure',
+    'u.alb' = 'Urine Albumin',
+    'Height.Stand' = 'Height',
+    'insulin' = 'Insulin',
+    'Seg.Neut.perc' = '% Segmented Neutrophils',
+    'u.cr' = 'Urine Creatinine',
+    'Lymph.Perc' = '% Lymphocytes',
+    'Poverty.Ratio' = 'Poverty Ratio',
+    'pulse' = 'Pulse',
+    'wbc' = 'White Blood Cell Count',
+    'choles' = 'Cholesterol',
+    '^Waist.Circ' = 'Waist Circumference',
+    '^ast' = 'AST',
+    '^DBP' = 'Diastolic Blood Pressure',
+    '^ggt' = 'GGT',
+    '^cr' = 'Creatinine',
+    '^plt' = 'Platelets',
+    '^iron' = 'Iron'
+  )))  
+
+names.stats <- names(df.desc.stats)
+names.stats <- names.stats[! names.stats %in% c('Year','Year.2015')]
+  
+df.desc.stats %>% getDescriptionStatsBy(by=Year.2015, names.stats,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+add_total_col = FALSE) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+
+# mytheme <- gridExtra::ttheme_default(
+#     core = list(fg_params=list(cex = 0.7)),
+#     colhead = list(fg_params=list(cex = 0.5)),
+#     rowhead = list(fg_params=list(cex = 0.5)))
+# 
+# df.stats.pdm.grob <- df %>% tableGrob(theme=mytheme)
+
+
+```
+
+
+
+```{r}
+df.sampled <- df %>% drop_na(sample.ogtt.weight,a1c,two)  %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)
+
+paste("Diabetes Dx by Both:", df.sampled %>% filter(a1c>=6.5 | two>=200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by OGTT:", df.sampled %>% filter(two>=200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by A1c:", df.sampled %>% filter(a1c>=6.5) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c>=6.5 & two < 200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5 & two >= 200) %>% nrow() / 100000 ) 
+
+
+
+```
+
+
+
+```{r Figure 1}
+df.boxplot <- df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<6.5 & a1c>=3.7 ) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(4.9, 7, 0.8)) )   %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% drop_na(a1c_group)
+
+# Define the factor levels
+colors <- c(
+  "All" = "black",
+  "Cr<2" = "blue",
+  "Cr≥2" = "blue",
+  "Hgb≥13" = "green",
+  "Hgb<13" = "green",
+  "BMI<30" = "darkgreen",
+  "BMI≥30" = "darkgreen",
+  "FIB4≤2.67" = "red",
+  "FIB4>2.67" = "red",
+  "Age<60" = "darkorange",
+  "Age≥60" = "darkorange",
+  "SBP<140" = "purple",
+  "SBP≥140" = "purple"
+
+)
+
+levels_order <- names(colors)
+
+box.width=0.07
+ggplot() +
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 0.9, position = position_nudge(x = -0.6 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr<2), aes(x = a1c_group, y = two, color = factor("Cr<2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr>=2), aes(x = a1c_group, y = two, color = factor("Cr≥2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg>=13), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg<13), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(BMI < 30), aes(x = a1c_group, y = two, color = factor("BMI<30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.1 * box.width * 10), width = box.width * 0.95) +
+  geom_boxplot(data = df.boxplot %>% filter(BMI >=30), aes(x = a1c_group, y = two, color = factor("BMI≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0 * box.width * 10), width = box.width * 0.95,fill='black') + 
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 <= 2.67), aes(x = a1c_group, y = two, color = factor("FIB4≤2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.1 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 > 2.67), aes(x = a1c_group, y = two, color = factor("FIB4>2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age < 60), aes(x = a1c_group, y = two, color = factor("Age<60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age >=60), aes(x = a1c_group, y = two, color = factor("Age≥60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP < 140), aes(x = a1c_group, y = two, color = factor("SBP<140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP >=140), aes(x = a1c_group, y = two, color = factor("SBP≥140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.6 * box.width * 10), width = box.width * 0.95,fill='black') +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+```
+
+
+```{r}
+office_test$PDM <- as.factor(office_test$two >= 140 & office_test$two < 200)
+office_test$DM <- as.factor(office_test$two >= 200)
+
+
+X <- df.small$a1c
+# Function to find the closest value in A$Value
+
+f.find_closest <- function(x, value_vector, ppv_vector) {
+  closest_index <- which.min(abs(value_vector - x))
+  return(ppv_vector[closest_index])
+}
+
+# Find the closest Value for each element in X
+#closest_values <- mapply(X, find_closest, value_vector = A$threshold)
+
+# Create a data frame with the closest values and their corresponding PPV
+# data.frame(
+#   Value = X,
+#   Closest_Value = closest_values,
+#   PPV = A$precision[match(closest_values, A$threshold)]
+# ) %>% ggplot(aes(x=PPV))+ geom_histogram(aes(fill=Value>6.5),binwidth=0.05) + scale_y_log10()
+
+x = office_test
+y = "Pred.Base"
+dx= "DM"
+f.build.precise <- function(x,y,dx){
+X = x[,y]
+A<-pROC::coords(pROC::roc_(data=x,predictor=y,response=dx),ret=c("threshold","precision") ) 
+
+# Function to find the closest value in A$Value
+find_closest_ppv <- function(x, value_vector, ppv_vector) {
+  closest_index <- which.min(abs(value_vector - x))
+  return(ppv_vector[closest_index])
+}
+
+# Create a data frame to store the results
+result <- data.frame(
+  Value = X,
+  Closest_Value = NA,
+  PPV = NA
+)
+
+# Find the closest values and their corresponding PPVs
+for (i in seq_along(X[[1]])) {
+  closest_index <- which.min(abs(A$threshold - X[[1]][i]))
+  result$Closest_Value[i] <- A$threshold[closest_index]
+  result$PPV[i] <- A$precision[closest_index]
+}
+return(result[,"PPV"])
+}
+
+#return(
+#A$precision[match(closest_values, A$threshold)]#)
+#}
+
+x$PPV.DM.a1c <- f.build.precise(x,"a1c","DM")
+# x$PPV.DM.Base <- f.build.precise(x,"Pred.Base","DM") 
+# x$PPV.DM.Fasting <- f.build.precise(x,"Pred.Fasting","DM") 
+# x$PPV.DM.SDOH <- f.build.precise(x,"Pred.SDOH","DM") 
+# x$PPV.DM.Urine.Var <- f.build.precise(x,"Pred.Urine.Var","DM") 
+x$PPV.DM.Min <- f.build.precise(x,"Pred.MIN","DM")
+# x$PPV.DM.Var2 <- f.build.precise(x,"Pred.Var2","DM") 
+# x$PPV.DM.Full <- f.build.precise(x,"Pred.Full","DM") 
+
+
+x$PPV.PDM.a1c <- f.build.precise(x,"a1c","PDM")
+# x$PPV.PDM.Base <- f.build.precise(x,"Pred.Base","PDM") 
+# x$PPV.PDM.Fasting <- f.build.precise(x,"Pred.Fasting","PDM") 
+# x$PPV.PDM.SDOH <- f.build.precise(x,"Pred.SDOH","PDM") 
+# x$PPV.PDM.Urine.Var <- f.build.precise(x,"Pred.Urine.Var","PDM") 
+x$PPV.PDM.Min <- f.build.precise(x,"Pred.MIN","PDM")
+# x$PPV.PDM.Var2 <- f.build.precise(x,"Pred.Var2","PDM") 
+# 
+# x$PPV.PDM.Full <- f.build.precise(x,"Pred.Full","PDM") 
+
+
+x$PPV.Two <- ifelse(x$two>=200,1.1,ifelse(x$two>=140,-0.5,-1))
+```
+
+```{r}
+x %>% ggplot()+ geom_point(aes(x=a1c,y=PPV.DM.Min))
+plot.ppv.comparison <- x %>% ggplot() + geom_point(aes(x=PPV.DM.Min,y=PPV.PDM.Min)) + 
+  geom_abline(aes(slope=1,intercept=0),linetype='dashed') + 
+  xlab("PPV of Diabetes by Model") + 
+  ylab("PPV of Pre-Diabetes by Model")+
+  xlim(c(0,1)) + ylim(c(0,1))
+  
+ggsave(file="~/Dropbox/NHANES manuscript/PPV.comparison.jpg",plot=plot.ppv.comparison)
+
+
+#x %>% ggplot() + geom_point(aes(x=PPV.DM.Full,y=PPV.PDM.Full)) + geom_abline(aes(slope=1,intercept=0))
+
+x %>% filter(PPV.DM.Min<0.5) %>% select(PPV.PDM.Min) %>% min()
+x %>% select(PPV.DM.Min) %>% min()
+```
+
+
+```{r}
+library(ggalluvial)
+library(plyr)
+xx <- x %>% filter(a1c<6.5) %>% sample_n(size=10000,weight = sample.ogtt.weight,replace=TRUE) %>% select(contains("PPV"))
+
+# Use lapply to categorize each column
+ordinal_sets <- lapply(xx, function(column) cut(column, breaks = c(-1,-0.6,0,0.06,0.39,0.7,1,1.5) , labels = FALSE, include.lowest = TRUE))
+
+# Convert the list to a data frame and rename columns
+ordinal_sets_df <- as.data.frame(ordinal_sets)
+colnames(ordinal_sets_df) <- colnames(xx)
+
+ 
+ordinal_sets_df  %>%  select(PPV.DM.a1c,PPV.DM.Min,PPV.Two) %>%  #select(PPV.DM.a1c,PPV.DM.Base,PPV.DM.Fasting,PPV.DM.Full,PPV.DM.Min,PPV.Two) %>% 
+  filter(!(PPV.DM.a1c<=4   & PPV.DM.Min<=4 & PPV.Two<=2)) %>% 
+  filter(!(PPV.DM.a1c==7  & PPV.Two==7 & PPV.DM.Min==7)) %>%   
+  #filter(!(PPV.DM.a1c<=4 & PPV.DM.Base<=4 & PPV.DM.Fasting<=4 & PPV.DM.Full<=4  & PPV.DM.Min<=4 & PPV.Two<=2)) %>% 
+  #filter(!(PPV.DM.a1c==7 & PPV.DM.Base==7 & PPV.DM.Fasting==7 & PPV.DM.Full==7 & PPV.Two==7 & PPV.DM.Min==7)) %>%   
+  
+  mutate(
+    across(contains("PPV"), ~ factor(.x, levels = sort(unique(.x)), ordered = TRUE)),
+    PPV.a1c = factor(PPV.DM.a1c, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Base = factor(PPV.DM.Base, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Fasting = factor(PPV.DM.Fasting, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Full = factor(PPV.DM.Full, levels = c(1,2,3,4,5,6,7)) ,
+    PPV.Two = factor(PPV.Two, levels = c(1,2,3,4,5,6,7)),
+    PPV.Min = factor(PPV.DM.Min, levels = c(1,2,3,4,5,6,7))
+  ) %>% # arrange(PPV.a1c,PPV.Base,PPV.Fasting,PPV.Full,PPV.Min,PPV.Two) %>% 
+  ggplot(aes(axis1=PPV.Two, axis2 = PPV.DM.a1c, 
+             #axis3 = PPV.DM.Base, axis4 = PPV.DM.Fasting, 
+             #axis5 = PPV.DM.Full,
+             axis5=PPV.DM.Min,axis6=PPV.Two)) +
+  stat_stratum(width=1/4,aes(color=after_stat(stratum))) + 
+  stat_flow(aes(fill=PPV.Two),width = 1/4, aes.bind = TRUE,alpha=0.5) +
+  scale_x_discrete(limits = c("OGTT","A1c",
+                              #"Base","Fasting",#"Full",
+                              "Min","OGTT."), expand = c(.05, .05)) +
+  labs(y = "Individuals out of 1000", title = "Flow Diagram of Predictions of OGTT-based Diabetes from Models") +
+  scale_fill_manual(name="2-hour glucose",labels=c("< 140 mg/dL","140-200 mg/dL","≥200 mg/dL","?"),values=c('blue','green',"purple")) +
+  geom_text(stat = "stratum",size=5, aes(color=after_stat(stratum),label=after_stat(revalue(stratum,c("1"="Normal","1"="","2"="Pre-DM","3"="<6%","4"="P(Pre-DM)>P(DM)","5"="39-70%","6"=">70%","7"="DM")))),angle=90) +
+  scale_color_manual(name="Positive\nPredictive\nValue",labels=c("Normal","Pre-DM","<6%","P(Pre-DM)>P(DM)","39-70%","70-100%","DM"),values=c("blue","darkgreen","magenta","brown","red","purple","black")) + theme(legend.key = element_rect(color="square")) +
+  theme_minimal() + guides(
+  color = guide_legend(
+    title = "Positive\nPredictive\nValue",
+    override.aes = aes(label = "X")
+  )
+)
+```
+
+
+```{r}
+xx <- x %>% filter(a1c<6.5) %>% sample_n(size=10000,weight = sample.ogtt.weight,replace=TRUE) %>% select(contains("PPV"),contains('a1c'))
+a1c.temp <- xx$a1c
+xx <- xx %>% select(contains("PPV"))
+# Use lapply to categorize each column
+ordinal_sets <- lapply(xx, function(column) cut(column, breaks = c(-1,-0.6,0,0.06,0.39,0.7,1,1.5) , labels = FALSE, include.lowest = TRUE))
+
+# Convert the list to a data frame and rename columns
+ordinal_sets_df <- as.data.frame(ordinal_sets)
+colnames(ordinal_sets_df) <- colnames(xx)
+
+ 
+ordinal_sets_df  %>%  select(PPV.DM.a1c,PPV.DM.Min,PPV.Two) %>%  #select(PPV.DM.a1c,PPV.DM.Base,PPV.DM.Fasting,PPV.DM.Full,PPV.DM.Min,PPV.Two) %>% 
+  filter(!(PPV.DM.a1c<=4   & PPV.DM.Min<=4 & PPV.Two<=2)) %>% 
+  filter(!(PPV.DM.a1c==6  & PPV.Two==7 & PPV.DM.Min==6)) %>%   
+  #filter(!(PPV.DM.a1c<=4 & PPV.DM.Base<=4 & PPV.DM.Fasting<=4 & PPV.DM.Full<=4  & PPV.DM.Min<=4 & PPV.Two<=2)) %>% 
+  #filter(!(PPV.DM.a1c==7 & PPV.DM.Base==7 & PPV.DM.Fasting==7 & PPV.DM.Full==7 & PPV.Two==7 & PPV.DM.Min==7)) %>%   
+  
+  mutate(
+    across(contains("PPV"), ~ factor(.x, levels = sort(unique(.x)), ordered = TRUE)),
+    PPV.a1c = factor(PPV.DM.a1c, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Base = factor(PPV.DM.Base, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Fasting = factor(PPV.DM.Fasting, levels = c(1,2,3,4,5,6,7)), 
+    #PPV.Full = factor(PPV.DM.Full, levels = c(1,2,3,4,5,6,7)) ,
+    PPV.Two = factor(PPV.Two, levels = c(1,2,3,4,5,6,7)),
+    PPV.Min = factor(PPV.DM.Min, levels = c(1,2,3,4,5,6,7))
+  ) %>% # arrange(PPV.a1c,PPV.Base,PPV.Fasting,PPV.Full,PPV.Min,PPV.Two) %>% 
+  ggplot(aes(#axis1=PPV.Two, 
+             axis1 = PPV.DM.a1c, 
+             #axis3 = PPV.DM.Base, axis4 = PPV.DM.Fasting, 
+             #axis5 = PPV.DM.Full,
+             axis2 = PPV.DM.Min
+             #axis6=PPV.Two
+             )) +
+  stat_stratum(width=1/4,aes(color=after_stat(stratum))) + 
+  stat_flow(aes(fill=PPV.Two),width = 1/4, alpha=0.5) +
+  scale_x_discrete(limits = c(#"OGTT",
+                              "A1c",
+                              #"Base","Fasting",#"Full",
+                              "Min"
+                              #"OGTT."
+                              ), expand = c(.05, .05)) +
+  labs(y = "Individuals out of 1000", title = "Flow Diagram of Predictions of OGTT-based Diabetes from Models") +
+  scale_fill_manual(name="2-hour glucose",labels=c("< 140 mg/dL","140-200 mg/dL","≥200 mg/dL","?"),values=c('purple','green',"maroon")) +
+  geom_text(stat = "stratum",size=5, aes(color=after_stat(stratum),label=after_stat(revalue(stratum,c("1"="Normal","1"="","2"="Pre-DM","3"="<6%","4"="P(Pre-DM)\n>P(DM)","5"="39-70%","6"=">70%","7"="DM")))),angle=00) +
+  scale_color_manual(name="Positive\nPredictive\nValue",labels=c("Normal","Pre-DM","<6%","P(Pre-DM)>P(DM)","39-70%","70-100%","DM"),values=c("blue","darkgreen","magenta","brown","red","purple","black")) + theme(legend.key = element_rect(color="square")) +
+  theme_minimal() + guides(
+  color = guide_legend(
+    title = "Positive\nPredictive\nValue",
+    override.aes = aes(label = "X")
+  )
+)
+```
+
+
+
+```{r}
+xx %>% mutate(PPV.Two = as.factor(PPV.Two)) %>% ggplot()+ geom_point(aes(x=PPV.DM.a1c,y=PPV.DM.Min,color=PPV.Two)) + geom_abline(aes(slope=1,intercept=0))  + facet_wrap(~PPV.Two)
+
+xx %>% ggplot()+ geom_point(aes(x=PPV.DM.a1c,y=PPV.DM.Min-PPV.DM.a1c,color=as.factor(PPV.Two))) #+ geom_abline(aes(slope=1,intercept=0))
+ 
+xx$a1c <- a1c.temp
+
+cutpoints = c(4,5.7,5.8,5.9,6,6.1,6.2,6.3,6.4)
+## cut(PPV.DM.a1c, breaks = cutpoints, include.lowest = TRUE)
+
+x3 <- xx %>% mutate(PPV.Two = as.factor(PPV.Two))%>% 
+  mutate(PPV.Two = revalue(PPV.Two,c("-1"= "Normal","-0.5"="Pre-Diabetes","1.1"="Diabetes"))) %>% 
+  mutate(a1c_cut = factor(cut(a1c,breaks=cutpoints,include.lowest = TRUE,))) 
+
+x4 <- x3 %>% filter(a1c<5.3 )  %>% dplyr::summarise(
+  PPV.DM.a1c = mean(PPV.DM.a1c),
+  PPV.DM.Min = PPV.DM.Min,
+  PPV.PDM.a1c = mean(PPV.DM.a1c),
+  PPV.PDM.Min = PPV.PDM.Min,
+  PPV.Two = PPV.Two,
+  a1c = a1c,
+  a1c_cut = a1c_cut,
+) 
+
+
+plot.ppv <- x3  %>% filter(a1c>=5.7) %>% bind_rows(x4) %>% mutate(A1C = if_else(a1c>=5.7,as.character(a1c),"(4,5.7]") )  %>%
+  ggplot()+ geom_boxplot(aes(x=as.factor(A1C),y=PPV.DM.Min,fill=PPV.Two)) +# facet_wrap(~a1c_cut,scales="free_x") +
+  geom_boxplot(aes(x=as.factor(A1C),y=PPV.DM.a1c),outlier.shape=NA,linetype="solid",color='blue')  + 
+  geom_abline(aes(slope=0,intercept=0,color="PPV.DM.A1c"),linetype="solid" )+ scale_color_manual(name="",values=c('PPV.DM.A1c'='blue'),labels=c('PPV.DM.A1c'='PPV for\nDiabetes\ngiven A1c')) + labs(title="PPV for Diabetes stratified by A1c",fill="2-hour\nGlucose\nDiagnosis") + xlab("A1c") + ylab("PPV for Diabetes by Model") + 
+  scale_fill_manual(values = c("Normal" = "purple", "Pre-Diabetes" = "green", "Diabetes" = "maroon"))  +
+  #scale_color_manual(values = c("Normal" = "blue", "Pre-Diabetes" = "green", "Diabetes" = "maroon")) +
+  theme_minimal(); print(plot.ppv)
+
+ggsave(file="~/Dropbox/NHANES manuscript/Plot-PPV.jpg",plot=plot.ppv)
+
+
+
+```
+
+
+
+```{r}
+
+xx <- x %>% filter(a1c<6.5) %>% sample_n(size=10000,weight = sample.ogtt.weight,replace=TRUE) %>% select(contains("PPV"))
+
+
+# Load necessary packages
+library(tidyverse)
+
+# Sample data (assuming df is already defined and loaded)
+# df <- read_csv("your_data.csv")
+
+# Define the cutpoints for X
+cutpoints <- seq(0,1, length.out = 21)
+
+# Create a new column in the dataframe indicating the cutpoint range
+xx <- xx %>%
+  mutate(X_cut = cut(PPV.DM.a1c, breaks = cutpoints, include.lowest = TRUE)) %>% 
+  mutate(X_cut = droplevels(X_cut)) %>% mutate(X_cut_num = as.numeric(X_cut)) %>% 
+  mutate(PPV.Two = factor(PPV.Two)) %>% 
+  mutate(PPV.Two = revalue(PPV.Two,c("-1"= "Normal","-0.5"="Pre-Diabetes","1.1"="Diabetes")))
+
+xxx <- xx %>% group_by(X_cut) %>% dplyr::summarise(mean_PPV = mean(PPV.DM.a1c)) 
+
+xxx <- xx %>% left_join(xxx,join_by(X_cut)) %>% ungroup()
+
+# Plot the boxplots using ggplot
+ggplot() +
+  geom_boxplot(data=xxx, aes(x = X_cut, y = PPV.DM.Min, fill = as.factor(PPV.Two) ) ) +
+  geom_segment(data=xxx %>% select(X_cut_num,mean_PPV) %>% unique(),aes(x=X_cut_num-0.5, xend=X_cut_num+0.5, y=mean_PPV,yend=mean_PPV),linetype="dashed") + 
+  #facet_wrap(~ as.factor(X_cut), scales = "free") +
+  labs(x = "PPV for Diabetes given A1c", y = "PPV for Diabetes given Min Model", fill = "Diagnosis") +
+  theme_minimal() +
+  theme(legend.position = "right") 
+
+
+
+
+xx <- xx %>%
+  mutate(X_cut = cut(PPV.PDM.a1c, breaks = cutpoints, include.lowest = TRUE)) %>% 
+  mutate(X_cut = droplevels(X_cut)) %>% mutate(X_cut_num = as.numeric(X_cut)) %>% 
+  mutate(PPV.Two = factor(PPV.Two)) %>% 
+  mutate(PPV.Two = revalue(PPV.Two,c("-1"= "Normal","-0.5"="Pre-Diabetes","1.1"="Diabetes")))
+
+xxx <- xx %>% group_by(X_cut) %>% dplyr::summarise(mean_PPV = mean(PPV.PDM.a1c)) 
+
+xxx <- xx %>% left_join(xxx,join_by(X_cut)) %>% ungroup()
+
+# Plot the boxplots using ggplot
+ggplot() +
+  geom_boxplot(data=xxx, aes(x = X_cut, y = PPV.PDM.Min, fill = as.factor(PPV.Two) ) ) +
+  geom_segment(data=xxx %>% select(X_cut_num,mean_PPV) %>% unique(),aes(x=X_cut_num-0.5, xend=X_cut_num+0.5, y=mean_PPV,yend=mean_PPV),linetype="dashed") + 
+  #facet_wrap(~ as.factor(X_cut), scales = "free") +
+  labs(x = "PPV for Pre-Diabetes given A1c", y = "PPV for Pre-Diabetes given Min Model", fill = "Diagnosis") +
+  theme_minimal() +
+  theme(legend.position = "right") 
+
+```
+
+
+
+
+```{r}
+### Sensitivity = TPR
+### Specificity = 1 - FPR
+
+df.stat.2 %>% mutate() 
+
+
+office_test
+int.resample.df <- resample(seq(1,dim(df %>% drop_na(two,a1c,sample.ogtt.weight))[1]),probs=sample.ogtt.weight/sum(sample.ogtt.weight),size=10000)
+
+
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 0.6)),
+    colhead = list(fg_params=list(cex = 0.5)),
+    rowhead = list(fg_params=list(cex = 0.5)))
+
+df.stats.pdm.grob <- df.stats[1:7,] %>% tableGrob(theme=mytheme)
+df.stats.dm.grob <- df.stats[8:14,] %>% tableGrob(theme=mytheme)
+
+boxplot.table.stats<- df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) ) %>% group_by(a1c_group) %>% summarise(PreDM = round(sum(two>=140 & two < 200)/sum(two>0),2),DM = round(sum(two > 200)/sum(two>0),2))
+
+boxplot.table.stats.grob <- boxplot.table.stats[2:9,]  %>% tableGrob(theme=mytheme)
+
+set.seed(1234)
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) )  %>% ggplot(aes(x= a1c_group, y = two))   + geom_boxplot(alpha=0.9) + geom_hline(aes(yintercept=140),color='red')+ geom_hline(aes(yintercept=200),color='red') + xlab('A1c Range')+ ylab('2-hour Glucose') + annotation_custom(boxplot.table.stats.grob,xmin=0,xmax=3.5,ymin=250,ymax=490) 
+
+
+
+```
+
+
+
+```{r Figure 1}
+df.boxplot <- df %>% drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<6.5 & a1c>=3.7 ) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(4.9, 7, 0.8)) )   %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% drop_na(a1c_group)
+
+# Define the factor levels
+colors <- c(
+  "All" = "black",
+  "Cr<2" = "blue",
+  "Cr≥2" = "blue",
+  "Hgb≥13" = "green",
+  "Hgb<13" = "green",
+  "BMI<30" = "darkgreen",
+  "BMI≥30" = "darkgreen",
+  "FIB4≤2.67" = "red",
+  "FIB4>2.67" = "red",
+  "Age<60" = "darkorange",
+  "Age≥60" = "darkorange",
+  "SBP<140" = "purple",
+  "SBP≥140" = "purple"
+
+)
+
+levels_order <- names(colors)
+
+box.width=0.07
+ggplot() +
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 0.9, position = position_nudge(x = -0.6 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr<2), aes(x = a1c_group, y = two, color = factor("Cr<2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr>=2), aes(x = a1c_group, y = two, color = factor("Cr≥2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg>=13), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg<13), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(BMI < 30), aes(x = a1c_group, y = two, color = factor("BMI<30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.1 * box.width * 10), width = box.width * 0.95) +
+  geom_boxplot(data = df.boxplot %>% filter(BMI >=30), aes(x = a1c_group, y = two, color = factor("BMI≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0 * box.width * 10), width = box.width * 0.95,fill='black') + 
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 <= 2.67), aes(x = a1c_group, y = two, color = factor("FIB4≤2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.1 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 > 2.67), aes(x = a1c_group, y = two, color = factor("FIB4>2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age < 60), aes(x = a1c_group, y = two, color = factor("Age<60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age >=60), aes(x = a1c_group, y = two, color = factor("Age≥60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP < 140), aes(x = a1c_group, y = two, color = factor("SBP<140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP >=140), aes(x = a1c_group, y = two, color = factor("SBP≥140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.6 * box.width * 10), width = box.width * 0.95,fill='black') +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+```
+
+
+
+
+```{r}
+
+
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE) %>% dplyr::summarise(DM=sum(a1c>=6.5 | two>=200),undxDM=sum(two>=200 & a1c<6.5),noDM=sum(a1c<6.5 & two<200),OGTT.DM=sum(two>=200),A1c.DM.notOGTT=sum(a1c>=6.5 & two < 200)) %>% mutate(Div = undxDM/OGTT.DM)
+
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% filter(two >= 200) %>% dplyr::summarise(A1c.PDM = sum(a1c<6.5 & a1c>=5.7)/n(),A1c.norm = sum(a1c<5.7)/n())
+
+
+
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% dplyr::summarise(PDM =sum(a1c>=5.7 & a1c<6.5), PDM.to.DM = sum(a1c>=5.7 & a1c<6.5 & two >=200),Norm.to.DM = sum(a1c<5.7 & two>=200), PDM.to.PDM = sum(a1c>=5.7 & a1c<6.5 & two < 200 & two >= 140),norm = sum(a1c<5.7)) %>% mutate(Div=PDM.to.DM/PDM,Div2=Norm.to.DM/norm)
+
+```
+
+```{r}
+# Load the required library
+library(ggplot2)
+
+# Assuming your data is in a dataframe called `data`
+# Columns: a1c_group (A1c bins), OGTT (2-hour glucose levels), diabetes_status (categorical variable: "no DM", "prediabetes", "diabetes")
+
+f.dm <- function(x){
+  if(x >=200){ y="Diabetes" }else if (x < 200 & x >=140){y="Pre-Diabetes"} else {y="Normal"}
+  return(y)
+}
+
+# Create the dot plot
+df %>% drop_na(sample.ogtt.weight,a1c,two) %>% select(a1c,two,sample.ogtt.weight) %>% mutate(diabetes_status = sapply(two,f.dm)) %>% filter(a1c<7) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 7, 0.4)) )   %>% 
+  ggplot( aes(x = a1c_group, y = two, color = diabetes_status,fill= diabetes_status)) +
+  geom_dotplot(binaxis = "y",
+               stackdir = "center",
+               binwidth = 1,
+               dotsize = 0.2,
+               stackratio = 0.5) +
+  scale_fill_manual(values = c("Normal" = "blue", "Pre-Diabetes" = "green", "Diabetes" = "maroon"))  +
+  scale_color_manual(values = c("Normal" = "blue", "Pre-Diabetes" = "green", "Diabetes" = "maroon")) +
+  labs(title = "Distribution of OGTT Levels by A1c",
+       x = "A1c Range",
+       y = "2-hour Glucose Levels",
+       fill = "Diabetes Status") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray", linetype = "dashed")
+  )
+
+
+plot.a1c.bins<-df %>% drop_na(sample.ogtt.weight,a1c,two) %>% select(a1c,two,sample.ogtt.weight) %>% mutate(diabetes_status = sapply(two,f.dm)) %>% filter(a1c<10) %>% filter(a1c>4.1) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(3.3, 6.5, 0.8)) )   %>% 
+  mutate(diabetes_status=factor(diabetes_status,levels=c("Diabetes","Pre-Diabetes","Normal"))) %>% 
+  filter(!is.na(a1c_group)) %>% 
+  ggplot( aes(x = a1c_group, y = two, color = diabetes_status,fill= diabetes_status)) +
+  geom_dotplot(binaxis = "y",
+               stackdir = "center",
+               binwidth = 1,
+               dotsize = 0.2,
+               stackratio = 0.5) +
+  scale_fill_manual(values = c("Normal" = "purple", "Pre-Diabetes" = "green", "Diabetes" = "maroon"))  +
+  scale_color_manual(values = c("Normal" = "purple", "Pre-Diabetes" = "green", "Diabetes" = "maroon")) +
+  labs(title = "Distribution of OGTT Levels by A1c",
+       x = "A1c Range",
+       y = "2-hour Glucose Levels",
+       fill = "2-hour\nGlucose\nDiagnosis",
+       color= "2-hour\nGlucose\nDiagnosis") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid.major = element_line(color = "gray", linetype = "dashed")
+  );print(plot.a1c.bins)
+
+```
+
+
+
+```{r}
+resample.size <- 100000
+int.resample.test <- resample(seq(1,dim(df.small)[1]),probs=df.small$sample.ogtt.weight/sum(df.small$sample.ogtt.weight),size=resample.size)
+df.small.resamp <- df.small[int.resample.test,]
+```
+
+
+```{r}
+df.small.resamp %>% filter(two>=200) %>% dim()
+df.small.resamp %>% filter(two>=200 & a1c<6.5) %>% dim()
+df.small.resamp %>% filter(two<200 & a1c>=6.5) %>% dim()
+df.small.resamp %>% filter(two>=200 & a1c>=6.5) %>% dim()
+
+df.small.resamp %>% filter(two>=200 | a1c>=6.5) %>% dim()
+
+df.small.resamp %>% filter(two>=200 & a1c<6.5) %>% dim()/df.small.resamp %>% filter(two>=200) %>% dim()
+
+
+df.small.resamp %>% filter(two>=200 & a1c>=6.1 & a1c<6.5) %>% dim()
+
+df.small %>% filter(Year<2015) %>% dim()
+df.small %>% filter(Year==2015) %>% dim()
+
+
+```
+```{r}
+df.small.resamp %>% filter(two>=140 & two <200) %>% dim()
+df.small.resamp %>% filter(two>=140   & two <200 & a1c<5.7 ) %>% dim()
+df.small.resamp %>% filter(two>=140   & two <200 & a1c < 6.5 & a1c>=5.7) %>% dim()
+df.small.resamp %>% filter(two>=140 & two<200 & a1c>=5.7 & a1c<6.5) %>% dim()
+
+df.small.resamp %>% filter((two>=140 & two<200) | (a1c>=5.7 & a1c<6.5)) %>% dim()
+
+df.small.resamp %>% filter(two>=140   & two <200 & a1c<5.7 ) %>% dim() / df.small.resamp %>% filter(two>=140 & two <200) %>% dim()
+
+```
+
+
+```{r}
+
+df.small.resamp %>% filter((two>=140 & two<200) | (a1c>=5.7 & a1c<6.5)) %>% dim()
+
+
+```
+
+
+```{r Loading the Cohort tests}
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_Age>60_2024.12.12.Rda")
+office_test.Age <- office_test
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_BMI>30_2024.12.12.Rda")
+office_test.BMI <- office_test
+
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_FIB4>2.67_2024.12.12.Rda")
+office_test.FIB4 <- office_test
+
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_ggt>40_2024.12.12.Rda")
+office_test.GGT <- office_test
+
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_SBP>140_2024.12.12.Rda")
+office_test.SBP <- office_test
+
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_WC>110_2024.12.12.Rda")
+office_test.WC <- office_test
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_all_2024.12.12.Rda")
+office_test.All <- office_test
+
+load("~/Documents/NHANES15-16/2024-12-14_res/NHANES-office-test-layered_wIns_MIN_eGFR<60_2024.12.12.Rda")
+office_test.eGFR <- office_test
+
+#load("~/Documents/NHANES15-16/NHANES-office-test-layered_wIns_MIN_")
+#office_test.eGFR <- office_test
+
+
+```
+
+
+```{r MANUSCRIPT - Making ROC Figures with All and Subpopulations}
+
+  
+yy <- office_test.All
+x0.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x0.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="All")
+x0.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="All")
+x0.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="All")
+
+
+yy <- office_test.Age
+x1.yy.pdm<-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x1.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="Age>60")
+x1.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="Age>60")
+x1.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="Age>60")
+
+
+yy <- office_test.BMI
+x2.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x2.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="BMI>30")
+x2.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="BMI>30")
+x2.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="BMI>30")
+
+yy <- office_test.WC  
+x3.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x3.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="WC>110")
+x3.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="WC>110")
+x3.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="WC>110")
+
+yy <- office_test.FIB4
+x4.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x4.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="FIB4>2.67")
+x4.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="FIB4>2.67")
+x4.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="FIB4>2.67")
+
+
+yy <- office_test.eGFR
+x5.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x5.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="eGFR<60")
+x5.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="eGFR<60")
+x5.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="eGFR<60")
+
+yy <- office_test.SBP
+x6.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)# %>% as.data.frame() %>% mutate(Stat="A1c",Dx="pdm",Cohort="SBP>140")
+x6.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="SBP>140")
+x6.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="SBP>140")
+x6.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="SBP>140")
+
+
+
+
+roc.pdm.cohort <-bind_rows(
+  x0.pdm.roc.a1c ,
+x0.pdm.roc.min,
+x0.pdm.roc.full,
+
+x1.pdm.roc.a1c,
+x1.pdm.roc.min,
+x1.pdm.roc.full,
+
+x2.pdm.roc.a1c,
+x2.pdm.roc.min,
+x2.pdm.roc.full,
+
+# x3.pdm.roc.a1c,
+# x3.pdm.roc.min,
+
+x4.pdm.roc.a1c,
+x4.pdm.roc.min,
+x4.pdm.roc.full,
+
+x5.pdm.roc.a1c,
+x5.pdm.roc.min,
+x5.pdm.roc.full,
+
+x6.pdm.roc.a1c,
+x6.pdm.roc.min,
+x6.pdm.roc.full,
+
+) 
+
+
+## DM
+yy <- office_test.All
+yy.dm <-  factor(yy$two >= 200)
+x0.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="All")
+x0.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="All")
+x0.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="All")
+
+yy <- office_test.Age
+yy.dm <-  factor(yy$two >= 200)
+x1.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="Age>60")
+x1.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="Age>60")
+x1.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="Age>60")
+
+yy <- office_test.BMI
+yy.dm <-  factor(yy$two >= 200)
+x2.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="BMI>30")
+x2.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="BMI>30")
+x2.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="BMI>30")
+
+yy <- office_test.WC  
+yy.dm <-  factor(yy$two >= 200)
+x3.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="WC>110")
+x3.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="WC>110")
+x3.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="WC>110")
+
+yy <- office_test.FIB4
+yy.dm <-  factor(yy$two >= 200)
+x4.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="FIB4>2.67")
+x4.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="FIB4>2.67")
+x4.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="FIB4>2.67")
+
+yy <- office_test.GGT
+yy.dm <-  factor(yy$two >= 200)
+x5.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="eGFR<60")
+x5.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="eGFR<60")
+x5.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="eGFR<60")
+
+yy <- office_test.SBP
+yy.dm <-  factor(yy$two >= 200)
+x6.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="SBP>140")
+x6.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="SBP>140")
+x6.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="SBP>140")
+
+
+
+
+
+roc.dm.cohort <-bind_rows(
+  x0.dm.roc.a1c ,
+x0.dm.roc.min,
+x0.dm.roc.full,
+
+x1.dm.roc.a1c,
+x1.dm.roc.min,
+x1.dm.roc.full,
+
+x2.dm.roc.a1c,
+x2.dm.roc.min,
+x2.dm.roc.full,
+
+#x3.dm.roc.a1c,
+#x3.dm.roc.min,
+
+x4.dm.roc.a1c,
+x4.dm.roc.min,
+x4.dm.roc.full,
+
+x5.dm.roc.a1c,
+x5.dm.roc.min,
+x5.dm.roc.full,
+
+x6.dm.roc.a1c,
+x6.dm.roc.min,
+x6.dm.roc.full
+) 
+
+
+library(ggrepel)
+plot.pdm.cohort.roc <- roc.pdm.cohort %>% bind_rows(roc.pdm.cohort  %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% filter(Stat=="A1c" | Stat=="Min") %>% 
+  ggplot() + geom_line(aes(x=fpr,y=tpr,color=Cohort,linetype=Stat))  +
+ geom_point(data=. %>% filter(!is.na(Best)),aes(label=paste0(round(fpr,2),', ',round(tpr,2)),x=fpr,y=tpr,color=Cohort,shape=Stat),size=2) +   
+  geom_text_repel(data=. %>% filter(!is.na(Best)),aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2) + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted")+ facet_wrap(~Cohort)  + labs(title="Pre-Diabetes Diagnosis") + xlab("1-Specificity") + ylab("Sensitivity") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+plot.dm.cohort.roc <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% 
+                                                    mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>%   filter(Stat=="A1c" | Stat=="Min") %>% 
+ ggplot(aes(x=fpr,y=tpr,color=Cohort,linetype=Stat,shape=Stat)) + geom_line() +
+ geom_point(data=. %>% filter(!is.na(Best)),
+            aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
+  geom_text_repel(data=. %>% filter(!is.na(Best)),
+                  aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2,color='black') + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted") + facet_wrap(~Cohort) + labs(title="Diabetes Diagnosis") + xlab("1-Specificity") + ylab("Sensitivity") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+
+grid.plot.cohort.roc<-grid.arrange(plot.pdm.cohort.roc,plot.dm.cohort.roc,ncol=2)
+ggsave(file='~/Dropbox/NHANES manuscript/Grid-PreDM-DM-Cohorts-MinvA1c.jpg',plot=grid.plot.cohort.roc)
+
+
+
+plot.roc.abstract <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
+bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) ) %>% 
+ filter(Cohort=="All") %>% 
+  mutate(Diagnosis=if_else(Dx=="DM","Diabetes","Pre-Diabetes")) %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
+ ggplot(aes(x=fpr,y=tpr,linetype=Stat,shape=Stat,color=Diagnosis)) + geom_line() +
+ geom_point(data=. %>% filter(!is.na(Best)),
+            aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=3) +   
+  geom_text_repel(data=. %>% filter(!is.na(Best)),
+                  aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr)) + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted") + labs(title="Receiver Operator Curves",linetype="Method",shape="Method") + xlab("1-Specificity") + ylab("Sensitivity") + 
+  scale_color_manual(values=c("Diabetes"="maroon","Pre-Diabetes"="green")) ; print(plot.roc.abstract)
+ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1cvFull.jpg',plot=plot.roc.abstract)
+
+plot.roc.abstract <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
+bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) ) %>% 
+ filter(Cohort=="All") %>% 
+  mutate(Diagnosis=if_else(Dx=="DM","Diabetes","Pre-Diabetes")) %>% filter(Stat=="Min" |Stat=="A1c") %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
+ ggplot(aes(x=fpr,y=tpr,linetype=Stat,shape=Stat,color=Diagnosis)) + geom_line() +
+ geom_point(data=. %>% filter(!is.na(Best)),
+            aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
+  geom_text_repel(data=. %>% filter(!is.na(Best)),
+                  aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=3) + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted") + labs(title="Receiver Operator Curves",linetype="Method",shape="Method") + xlab("1-Specificity") + ylab("Sensitivity") + 
+  scale_color_manual(values=c("Diabetes"="maroon","Pre-Diabetes"="green")); print(plot.roc.abstract)
+
+ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1c.jpg',plot=plot.roc.abstract)
+
+
+#roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% mutate(PPV = tpr/)
+```
+
+
+```{r Getting the AUROCs}
+
+yy <- office_test.All
+x0.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x0.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x0.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x0.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.Age
+x1.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x1.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x1.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x1.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.BMI
+x2.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x2.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x2.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x2.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.WC  
+x3.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x3.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x3.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x3.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.FIB4
+x4.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x4.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x4.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x4.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.eGFR
+x5.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x5.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x5.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x5.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+yy <- office_test.SBP
+x6.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x6.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x6.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
+x6.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
+
+## DM
+yy <- office_test.All
+yy.dm <- factor(yy$two >= 200)
+x0.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x0.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x0.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.Age
+yy.dm <- factor(yy$two >= 200)
+x1.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x1.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x1.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.BMI
+yy.dm <- factor(yy$two >= 200)
+x2.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x2.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x2.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.WC  
+yy.dm <- factor(yy$two >= 200)
+x3.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x3.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x3.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.FIB4
+yy.dm <- factor(yy$two >= 200)
+x4.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x4.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x4.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.GGT
+yy.dm <- factor(yy$two >= 200)
+x5.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x5.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x5.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+yy <- office_test.SBP
+yy.dm <- factor(yy$two >= 200)
+x6.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x6.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
+x6.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
+
+```
+
+
+```{r}
+# Create a data frame with PDM and DM side by side
+combined_auroc_table <- data.frame(
+  Cohort = c("All", "Age>60", "BMI>30", "WC>110", "FIB4>2.67", "eGFR<60", "SBP>140"),
+  AUROC_A1c_PDM = round(c(x0.pdm.auroc.a1c, x1.pdm.auroc.a1c, x2.pdm.auroc.a1c, x3.pdm.auroc.a1c, 
+                           x4.pdm.auroc.a1c, x5.pdm.auroc.a1c, x6.pdm.auroc.a1c), 3),
+  AUROC_A1c_DM  = round(c(x0.dm.auroc.a1c, x1.dm.auroc.a1c, x2.dm.auroc.a1c, x3.dm.auroc.a1c, 
+                           x4.dm.auroc.a1c, x5.dm.auroc.a1c, x6.dm.auroc.a1c), 3),
+  AUROC_Min_PDM = round(c(x0.pdm.auroc.min, x1.pdm.auroc.min, x2.pdm.auroc.min, x3.pdm.auroc.min, 
+                           x4.pdm.auroc.min, x5.pdm.auroc.min, x6.pdm.auroc.min), 3),
+  AUROC_Min_DM  = round(c(x0.dm.auroc.min, x1.dm.auroc.min, x2.dm.auroc.min, x3.dm.auroc.min, 
+                           x4.dm.auroc.min, x5.dm.auroc.min, x6.dm.auroc.min), 3),
+  AUROC_Full_PDM = round(c(x0.pdm.auroc.full, x1.pdm.auroc.full, x2.pdm.auroc.full, x3.pdm.auroc.full, 
+                            x4.pdm.auroc.full, x5.pdm.auroc.full, x6.pdm.auroc.full), 3),
+  AUROC_Full_DM  = round(c(x0.dm.auroc.full, x1.dm.auroc.full, x2.dm.auroc.full, x3.dm.auroc.full, 
+                            x4.dm.auroc.full, x5.dm.auroc.full, x6.dm.auroc.full), 3)
+)
+
+# Print the table
+print(combined_auroc_table)
+
+# Optional: Display the table nicely using knitr if in RMarkdown
+knitr::kable(combined_auroc_table, caption = "AUROC Results for PDM and DM")
+
+
+```
+
+
+
+
+
+
+```{r fig.cap="Figure: This is a figure"}
+
+grid.arrange(ncol=3,
+             plot.a1c.bins + labs(tag="A") + theme(axis.text=element_text(size=11),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18) ) ,
+            plot.roc.abstract + labs(tag="B") + theme(axis.text=element_text(size=11),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18) ) ,
+             plot.ppv + labs(tag="C") + theme(axis.text=element_text(size=11),
+            axis.title=element_text(size=18),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18) ) 
+             )
+
+
+
+```
+
+
+
+
+```{r MANUSCRIPT DCA Plots - Cohorts ,  echo=FALSE, include=TRUE}
+library(dcurves)
+
+### Age
+coh = "Age>60"
+x = office_test.Age
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+# Pre-Diabetes
+### bm = binom.model
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.Age <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.Age <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+plot.dca.eval.pdm.Age %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.Age %>%  plot() %>% suppressWarnings()
+
+
+
+
+### SBP
+coh = "SBP>140"
+x = office_test.SBP
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.SBP <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.SBP <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+plot.dca.eval.pdm.SBP %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.SBP %>%  plot() %>% suppressWarnings()
+
+### BMI
+coh = "BMI>30"
+x = office_test.BMI
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.BMI <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.BMI <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE)  + ggtitle(coh)
+
+plot.dca.eval.pdm.BMI %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.BMI %>%  plot() %>% suppressWarnings()
+
+
+### FIB4
+coh = "FIB-4>2.67"
+x = office_test.FIB4
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.FIB4 <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.FIB4 <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE)  + ggtitle(coh)
+
+plot.dca.eval.pdm.FIB4 %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.FIB4 %>%  plot() %>% suppressWarnings()
+
+
+
+
+### GGT
+coh = "eGFR<60"
+x = office_test.eGFR
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.eGFR <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.eGFR <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE)  + ggtitle(coh)
+
+
+plot.dca.eval.pdm.eGFR %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.eGFR %>%  plot() %>% suppressWarnings()
+
+### 
+coh = "All"
+x = office_test.All
+df.dca.eval <- x %>% mutate(PreDM = as.integer(two >= 140 & two < 200), DM = as.integer(two >= 200))
+df.dca.eval <-df.dca.eval[resample(seq(1,dim(df.dca.eval)[1]),probs=df.dca.eval$sample.ogtt.weight/sum(df.dca.eval$sample.ogtt.weight),size=10000),]
+
+bm.pdm.a1c <- glm(data=df.dca.eval,family=binomial,PreDM ~ a1c)#, weights = sample.ogtt.weight)
+bm.pdm.min <- glm(data=df.dca.eval,family=binomial,PreDM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.pdm.a1c = broom::augment(bm.pdm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.pdm.min = broom::augment(bm.pdm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.pdm.All <- dca(PreDM ~ pm.pdm.a1c + pm.pdm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.pdm.a1c = "A1c",
+  pm.pdm.min = "Model"
+)) %>%
+  plot(smooth = TRUE) + ggtitle(coh)
+
+
+bm.dm.a1c <- glm(data=df.dca.eval,family=binomial,DM ~ a1c)#, weights = sample.ogtt.weight)
+bm.dm.min <- glm(data=df.dca.eval,family=binomial,DM ~ Pred.MIN)#, weights = sample.ogtt.weight)
+
+df.dca.eval <- df.dca.eval %>% 
+  mutate(pm.dm.a1c = broom::augment(bm.dm.a1c, type.predict="response") %>% pull(".fitted"), 
+         pm.dm.min = broom::augment(bm.dm.min, type.predict="response") %>% pull(".fitted"))
+
+plot.dca.eval.dm.All <- dca(DM ~ pm.dm.a1c + pm.dm.min,
+    data = df.dca.eval,
+    thresholds = seq(0, 0.5, 0.05),
+    label = list(  
+  pm.dm.a1c = "A1c",
+  pm.dm.min = "Model"
+)) %>%
+  plot(smooth = TRUE)  + ggtitle(coh)
+
+plot.dca.eval.pdm.All %>% plot()  %>% suppressWarnings()
+plot.dca.eval.dm.All %>%  plot() %>% suppressWarnings()
+
+
+library(grid)
+library(cowplot)
+
+legend1<-get_legend(
+  plot.dca.eval.pdm.All +theme(legend.direction = "horizontal" ) + scale_color_discrete(labels=c("Test All","Test None","A1c","Model"))
+  ) 
+
+grid.dca.pdm.dm <- grid.arrange(nrow=2,heights=c(3,0.3),
+  arrangeGrob(ncol=2,
+    plot.dca.eval.pdm.All + theme(legend.position = "none") + ggtitle("Pre-Diabetes"),
+    plot.dca.eval.dm.All + theme(legend.position = "none") + ggtitle("Diabetes")),
+  legend1,top = textGrob("All Participants"))%>% suppressWarnings()
+ggsave(file='~/Dropbox/NHANES manuscript/DCA-Grid-PDM-DM.jpg',plot=grid.dca.pdm.dm,width=7,height=3.5,units="in")
+
+
+
+
+legend1<-get_legend(
+  plot.dca.eval.pdm.All +theme(legend.direction = "horizontal" ) + scale_color_discrete(labels=c("Test All","Test None","A1c","Model"))
+  ) 
+
+grid.dca.pdm <- grid.arrange(nrow=3,heights=c(3,3,0.5),
+            arrangeGrob(ncol=3,                             
+            plot.dca.eval.pdm.All + theme(legend.position = "none"),             
+             plot.dca.eval.pdm.Age+ theme(legend.position = "none"),
+             plot.dca.eval.pdm.BMI+ theme(legend.position = "none")),
+            arrangeGrob(ncol=3,            
+             plot.dca.eval.pdm.FIB4+ theme(legend.position = "none"),
+             plot.dca.eval.pdm.eGFR+ theme(legend.position = "none"),
+             plot.dca.eval.pdm.SBP+ theme(legend.position = "none")),
+            legend1,
+             top = textGrob("Pre-Diabetes")
+             ) %>% suppressWarnings()
+ggsave(file='~/Dropbox/NHANES manuscript/DCA-Grid-PDM.jpg',plot=grid.dca.pdm)
+
+library(cowplot)
+legend1<-get_legend(
+  plot.dca.eval.dm.All +theme(legend.direction = "horizontal" ) + scale_color_discrete(labels=c("Test All","Test None","A1c","Model"))
+  ) 
+
+grid.dca.dm <- grid.arrange(nrow=3,heights=c(3,3,0.5),
+            arrangeGrob(ncol=3,
+            plot.dca.eval.dm.All + theme(legend.position = "none"),             
+             plot.dca.eval.dm.Age+ theme(legend.position = "none"),
+             plot.dca.eval.dm.BMI+ theme(legend.position = "none")),
+            arrangeGrob(ncol=3,
+             plot.dca.eval.dm.FIB4+ theme(legend.position = "none"),
+             plot.dca.eval.dm.eGFR+ theme(legend.position = "none"),
+             plot.dca.eval.dm.SBP+ theme(legend.position = "none")),
+            legend1,
+             top = textGrob("Diabetes")
+             ) %>% suppressWarnings()
+
+ggsave(file='~/Dropbox/NHANES manuscript/DCA-Grid-DM.jpg',plot=grid.dca.dm)
+
+```
+
+
+
+```{MANUSCRIPT - END DCA r}
+
+```
+
+
+
+
+
+
+```{r}
+
+
+
+calculate_metrics_two_dm <- function(data, pred_min_threshold) {
+  data %>%
+    mutate(
+      gold_standard_pos = two >= 200,  # Gold standard: values in 'two' greater than or equal to 200
+      test_var_pos = Pred.MIN >= pred_min_threshold  # Test variable: Pred.MIN greater than or equal to threshold
+    ) %>%
+    summarise(
+      TP = sum(gold_standard_pos & test_var_pos),
+      FP = sum(!gold_standard_pos & test_var_pos),
+      FN = sum(gold_standard_pos & !test_var_pos),
+      TN = sum(!gold_standard_pos & !test_var_pos),
+      Precision = if_else(TP + FP > 0, TP / (TP + FP), 0),
+      Recall = if_else(TP + FN > 0, TP / (TP + FN), 0),
+      F1 = if_else(Precision + Recall > 0, 2 * Precision * Recall / (Precision + Recall), 0),
+      Accuracy = (TP + TN) / (TP + FP + FN + TN)
+    )
+}
+
+calculate_metrics_a1c_dm <- function(data, pred_min_threshold) {
+  data %>%
+    mutate(
+      gold_standard_pos = two >= 200,  # Gold standard: values in 'two' greater than or equal to 200
+      test_var_pos = a1c >= 6.5 ) %>%   # Note we can change this to 
+    dplyr::summarise(
+      TP = sum(gold_standard_pos & test_var_pos,na.rm=TRUE),
+      FP = sum(!gold_standard_pos & test_var_pos,na.rm=TRUE),
+      FN = sum(gold_standard_pos & !test_var_pos,na.rm=TRUE),
+      TN = sum(!gold_standard_pos & !test_var_pos,na.rm=TRUE),
+      Precision = if_else(TP + FP > 0, TP / (TP + FP), 0),
+      Recall = if_else(TP + FN > 0, TP / (TP + FN), 0),
+      F1 = if_else(Precision + Recall > 0, 2 * Precision * Recall / (Precision + Recall), 0),
+      Accuracy = (TP + TN) / (TP + FP + FN + TN)
+    )
+}
+
+calculate_metrics_two_pdm <- function(data, pred_min_threshold,pred_max_threshold=NA) {
+  pred_max_threshold = ifelse(is.na(pred_max_threshold),100000000000,pred_max_threshold )
+  data %>%
+    mutate(
+      gold_standard_pos = two >= 140 & two < 200,  # Gold standard: values in 'two' greater than or equal to 200
+      test_var_pos = Pred.MIN >= pred_min_threshold & Pred.MIN < pred_max_threshold  # Test variable: Pred.MIN greater than or equal to threshold
+    ) %>%
+    summarise(
+      TP = sum(gold_standard_pos & test_var_pos),
+      FP = sum(!gold_standard_pos & test_var_pos),
+      FN = sum(gold_standard_pos & !test_var_pos),
+      TN = sum(!gold_standard_pos & !test_var_pos),
+      Precision = if_else(TP + FP > 0, TP / (TP + FP), 0),
+      Recall = if_else(TP + FN > 0, TP / (TP + FN), 0),
+      F1 = if_else(Precision + Recall > 0, 2 * Precision * Recall / (Precision + Recall), 0),
+      Accuracy = (TP + TN) / (TP + FP + FN + TN)
+    )
+}
+
+calculate_metrics_a1c_pdm <- function(data, pred_min_threshold,pred_max_threshold=NA) {
+  pred_max_threshold = ifelse(is.na(pred_max_threshold),100000000000,pred_max_threshold )
+  data %>%
+    mutate(
+      gold_standard_pos = two >= 140 & two < 200,  # Gold standard: values in 'two' greater than or equal to 200
+      test_var_pos = a1c >= 5.7 & a1c<6.5) %>%   # Note we can change this to 
+    dplyr::summarise(
+      TP = sum(gold_standard_pos & test_var_pos,na.rm=TRUE),
+      FP = sum(!gold_standard_pos & test_var_pos,na.rm=TRUE),
+      FN = sum(gold_standard_pos & !test_var_pos,na.rm=TRUE),
+      TN = sum(!gold_standard_pos & !test_var_pos,na.rm=TRUE),
+      Precision = if_else(TP + FP > 0, TP / (TP + FP), 0),
+      Recall = if_else(TP + FN > 0, TP / (TP + FN), 0),
+      F1 = if_else(Precision + Recall > 0, 2 * Precision * Recall / (Precision + Recall), 0),
+      Accuracy = (TP + TN) / (TP + FP + FN + TN)
+    )
+}
+
+
+```
+
+
+
+
+
+
+```{r CALCULATING METRICS }
+
+
+f.pROC.cutoff <- function(x,predictor.x,response.x) 
+pROC::coords(pROC::roc_(data=x,predictor=predictor.x,response=response.x),"best")["threshold"] 
+
+
+int.resample.df <- resample(seq(1,dim(df %>% drop_na(two,a1c,sample.ogtt.weight))[1]),probs=sample.ogtt.weight/sum(sample.ogtt.weight),size=10000)
+#f.pROC.cutoff(office_test.FIB4,"a1c","DM")
+
+x <- office_test.FIB4
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+x.metric.a1c.FIB4 <- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c","DM"))) %>%     mutate(Stat="a1c",Cohort="FIB4>2.67",Dx="DM")
+x.metric.min.FIB4 <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN","DM"))) %>% mutate(Stat="Pred.MIN",Cohort="FIB4>2.67",Dx="DM")
+
+x <- office_test.Age
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "Age>60"
+dx <- "DM"
+x.metric.a1c.Age <- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.Age <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)) )%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+
+x <- office_test.All
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "All"
+dx <- "DM"
+x.metric.a1c.All <- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.All <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)) )%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.eGFR
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "GGT>40"
+dx <- "DM"
+x.metric.a1c.eGFR<- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.eGFR <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)) )%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.SBP
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "SBP>140"
+dx <- "DM"
+x.metric.a1c.SBP<- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.SBP <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)) )%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.BMI
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "BMI>30"
+dx <- "DM"
+x.metric.a1c.BMI<- calculate_metrics_a1c_dm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.BMI <- calculate_metrics_two_dm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)) )%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+# 
+# 
+# 
+# 
+# x <- office_test.
+# x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+# x$DM <- as.factor(x$two >= 200)
+# co <- ""
+# dx <- "DM"
+# x.metric.a1c. <- calculate_metrics(x, f.pROC.cutoff(x,"a1c",dx)) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+# x.metric.min. <- calculate_metrics(x, f.pROC.cutoff(x,"Pred.MIN",dx)) %>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+
+x.metrics<-bind_rows(
+  x.metric.a1c.FIB4,
+  x.metric.min.FIB4,
+  x.metric.a1c.Age,
+  x.metric.min.Age, 
+  x.metric.a1c.All,
+  x.metric.min.All,
+  x.metric.a1c.BMI,
+  x.metric.min.BMI, 
+  x.metric.a1c.eGFR,
+  x.metric.min.eGFR,
+  x.metric.a1c.SBP,
+  x.metric.min.SBP)
+
+
+x <- office_test.FIB4
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+x.metric.a1c.FIB4 <- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c","PDM"))) %>%     mutate(Stat="a1c",Cohort="FIB4>2.67",Dx="PDM")
+x.metric.min.FIB4 <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN","PDM")),unlist(f.pROC.cutoff(x,"Pred.MIN","DM"))) %>% mutate(Stat="Pred.MIN",Cohort="FIB4>2.67",Dx="PDM")
+
+x <- office_test.Age
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "Age>60"
+dx <- "PDM"
+x.metric.a1c.Age <- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.Age <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)),unlist(f.pROC.cutoff(x,"Pred.MIN","DM")))%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+
+x <- office_test.All
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "All"
+dx <- "PDM"
+x.metric.a1c.All <- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.All <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)),unlist(f.pROC.cutoff(x,"Pred.MIN","DM")))%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.eGFR
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "eGFR<60"
+dx <- "PDM"
+x.metric.a1c.eGFR<- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.eGFR <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)),unlist(f.pROC.cutoff(x,"Pred.MIN","DM")))%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.SBP
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "SBP>140"
+dx <- "PDM"
+x.metric.a1c.SBP<- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.SBP <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)),unlist(f.pROC.cutoff(x,"Pred.MIN","DM")))%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+x <- office_test.BMI
+x <- x[resample(seq(1,nrow(x)),probs=x$sample.ogtt.weight/sum(x$sample.ogtt.weight),size=10000),]
+x$PDM <- as.factor(x$two >= 140 & x$two < 200)
+x$DM <- as.factor(x$two >= 200)
+co <- "BMI>30"
+dx <- "PDM"
+x.metric.a1c.BMI<- calculate_metrics_a1c_pdm(x, unlist(f.pROC.cutoff(x,"a1c",dx))) %>%     mutate(Stat="a1c",Cohort=co,Dx=dx)
+x.metric.min.BMI <- calculate_metrics_two_pdm(x, unlist(f.pROC.cutoff(x,"Pred.MIN",dx)),unlist(f.pROC.cutoff(x,"Pred.MIN","DM")))%>% mutate(Stat="Pred.MIN",Cohort=co,Dx=dx)
+
+# 
+x.metrics <- bind_rows(  x.metrics,
+  x.metric.a1c.FIB4,
+  x.metric.min.FIB4,
+  x.metric.a1c.Age,
+  x.metric.min.Age, 
+  x.metric.a1c.All,
+  x.metric.min.All,
+  x.metric.a1c.BMI,
+  x.metric.min.BMI, 
+  x.metric.a1c.eGFR,
+  x.metric.min.eGFR,
+  x.metric.a1c.SBP,
+  x.metric.min.SBP)
+
+```
+
+
+```{r}
+
+plot.metrics.pdm <- x.metrics %>%  filter(Dx=="PDM") %>% filter(Cohort=="All") %>% group_by(Cohort,Stat,Dx) %>% summarise(Cohort=Cohort,Stat=Stat,Dx=Dx,TP=TP,FP=FP,FN=FN,TN=TN) %>% 
+  pivot_longer(-c(Cohort,Stat,Dx),names_to = "Variable",values_to = "Value")  %>% mutate(Stat=ifelse(Stat=="a1c","A1c",ifelse(Stat=="Pred.MIN","Model",NA))) %>%  ggplot() + geom_col(aes(x=Stat,y=Value,fill=Variable),position="dodge") + facet_wrap(~Cohort,scales = 'free') + labs(title="Pre-Diabetes Diagnosis") #+ scale_fill_discrete(label=c("Expected (TP+FN)","Observed (TP+FP)"))
+
+plot.metrics.dm <- x.metrics %>%  filter(Dx=="DM") %>% filter(Cohort=="All")%>% group_by(Cohort,Stat,Dx) %>% summarise(Cohort=Cohort,Stat=Stat,Dx=Dx,TP=TP,FP=FP,FN=FN,TN=TN) %>% 
+  pivot_longer(-c(Cohort,Stat,Dx),names_to = "Variable",values_to = "Value")  %>% mutate(Stat=ifelse(Stat=="a1c","A1c",ifelse(Stat=="Pred.MIN","Model",NA)))  %>%  ggplot() + geom_col(aes(x=Stat,y=Value,fill=Variable),position="dodge") + facet_wrap(~Cohort,scales="free") + labs(title="Diabetes Diagnosis") #+ scale_fill_discrete(label=c("Expected (TP+FN)","Observed (TP+FP)"))
+
+legend2 <- get_legend(plot.metrics.dm + theme(legend.direction = "horizontal" ))
+
+plot.tpfp.all<-grid.arrange(nrow=2,heights=c(3,0.2),
+arrangeGrob(ncol=2,
+            plot.metrics.pdm + theme(legend.position="none"),
+            plot.metrics.dm + theme(legend.position="none")),
+legend2
+)
+ggsave(file="~/Dropbox/NHANES manuscript/TPFP-all-A1c-vs-Model.jpg",plot=plot.tpfp.all)
+
+
+
+plot.metrics.pdm <- x.metrics %>%  filter(Dx=="PDM") %>% group_by(Cohort,Stat,Dx) %>% summarise(Cohort=Cohort,Stat=Stat,Dx=Dx,TP=TP,FP=FP,FN=FN,TN=TN) %>% 
+  pivot_longer(-c(Cohort,Stat,Dx),names_to = "Variable",values_to = "Value") %>% mutate(Stat=ifelse(Stat=="a1c","A1c",ifelse(Stat=="Pred.MIN","Model",NA)))  %>%  ggplot() + geom_col(aes(x=Stat,y=Value,fill=Variable),position="dodge") + facet_wrap(~Cohort,scales = 'free') + labs(title="Pre-Diabetes Diagnosis") #+ scale_fill_discrete(label=c("Expected (TP+FN)","Observed (TP+FP)"))
+
+plot.metrics.dm <- x.metrics %>%  filter(Dx=="DM") %>% group_by(Cohort,Stat,Dx) %>% summarise(Cohort=Cohort,Stat=Stat,Dx=Dx,TP=TP,FP=FP,FN=FN,TN=TN) %>% 
+  pivot_longer(-c(Cohort,Stat,Dx),names_to = "Variable",values_to = "Value") %>% mutate(Stat=ifelse(Stat=="a1c","A1c",ifelse(Stat=="Pred.MIN","Model",NA)))   %>%  ggplot() + geom_col(aes(x=Stat,y=Value,fill=Variable),position="dodge") + facet_wrap(~Cohort,scales="free") + labs(title="Diabetes Diagnosis") #+ scale_fill_discrete(label=c("Expected (TP+FN)","Observed (TP+FP)"))
+
+legend2 <- get_legend(plot.metrics.dm + theme(legend.direction = "horizontal" ))
+
+plot.tpfp.cohorts<- grid.arrange(nrow=2,heights=c(3,0.2),
+arrangeGrob(ncol=2,
+            plot.metrics.pdm + theme(legend.position="none"),
+            plot.metrics.dm + theme(legend.position="none")),
+legend2
+)
+ggsave(file="~/Dropbox/NHANES manuscript/TPFP-Cohorts-A1c-vs-Model.jpg",plot=plot.tpfp.cohorts)
+
+```
