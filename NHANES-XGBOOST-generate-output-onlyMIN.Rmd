@@ -333,8 +333,8 @@ df.small <- df %>% drop_na(a1c,two,sample.ogtt.weight)
 
 dir.string <-"~/Documents/NHANES15-16/"
 
-# filter.string <- "all"
-# df.small <- df.small
+filter.string <- "all"
+df.small <- df.small
 
 # df.small <- df.small %>% filter(Age > 50) 
 # filter.string <- "Age>50"
@@ -375,17 +375,17 @@ dir.string <-"~/Documents/NHANES15-16/"
 # filter.string <- "eGFR<60"
 
 
-df.small <- df.small %>% filter(hg<13)  #cm
-filter.string <- "hg<13"
+# df.small <- df.small %>% filter(hg<13)  #cm
+# filter.string <- "hg<13"
 
 # df.small <- df.small %>% select(fpg, Age, a1c, insulin, Height.Stand, tgy, SBP, Waist.Circ, choles, u.alb, cr, u.cr, DBP, Poverty.Ratio, Seg.Neut.perc, pulse, iron, Arm.Circ, plt, ggt,Year,sample.ogtt.weight,two)
 # filter.string <- "MINMODEL"
 
 
 
-file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_wIns_MIN_",filter.string,"_2024.12.12.Rda")
-file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_MIN_",filter.string,"_2024.12.12.Rda")
-file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_MIN_",filter.string,"_2024.12.12.Rda")
+file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_wIns_MIN_",filter.string,"_2025.02.06.Rda")
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_MIN_",filter.string,"_2025.02.06.Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_MIN_",filter.string,"_2025.02.06.Rda")
 file.list.models <- paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All-xgb.models")
 
 
@@ -569,7 +569,7 @@ xgb_tuned.full.29 <- caret::train(
 
 ```{r}
 
-#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2024.12.10.Rda"
+#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2025.02.06.Rda"
 save(xgb_tuned.full.29,file=file.xgb_tuned.full)
 
 #load(file=file.xgb_tuned.full)
@@ -644,10 +644,13 @@ Var.fasting = c("iron",'fpg','tgy','insulin')
 Var.Other.3 <- c("ggt","phos","u.alb", "u.cr","choles","HepB.sAb","HepB.cAb")
 
 Var.MIN <- c("fpg", "Age", "a1c", "insulin", "Height.Stand", "tgy", "SBP", "Waist.Circ", "choles", "u.alb", "cr", "u.cr", "DBP", "Poverty.Ratio", "Seg.Neut.perc", "pulse", "iron", "Arm.Circ", "plt", "ggt")
+
+VAR.MIN.2 <- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% head(20) %>% select(Feature) %>% pull(Feature)
 ### BASE: Clinic + Hx CBC + CMP + Hx
 ### + Fasting
 ### + Urine + Var.Other.1+ Var.Other.2 vs  + SDOH
 ### Full
+
 
 
 
@@ -709,11 +712,15 @@ Var.Urine,Var.Other.1,Var.Other.2,add_total_col = TRUE,) %>%
   addHtmlTableStyle(pos.caption = "bottom") %>% 
   htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
             tfoot = "&dagger; mg/dL")
+```
 
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
+
+```{r}
+
+df.small %>% mutate(Year.2015 = ifelse(Year > 2013,"2015-2016","2005-2014")) %>% 
   getDescriptionStatsBy(by=Year.2015,
 #`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.MIN,add_total_col = FALSE,) %>% 
+VAR.MIN.2,add_total_col = FALSE,) %>% 
   addHtmlTableStyle(pos.caption = "bottom") %>% 
   htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
             tfoot = "&dagger; mg/dL")
@@ -979,12 +986,12 @@ Var.MIN,add_total_col = FALSE,) %>%
 ### MIN MODEL
 
 
-office_train.MIN <- office_train %>% select(all_of(c(Var.MIN )))
+office_train.MIN <- office_train %>% select(all_of(c(VAR.MIN.2 )))
 
 office_train.makeX <- makeX(office_train.MIN)
 dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
 
-office_test.MIN <- office_test %>% select(all_of(c(Var.MIN )))
+office_test.MIN <- office_test %>% select(all_of(c(VAR.MIN.2 )))
 
 office_test.makeX <-  makeX(office_test.MIN)
 office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
@@ -1032,7 +1039,7 @@ save(office_test,file=file.office.test)
 ### This is a list of all the models in question
 #list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2,xgb.model.MIN)
 list.models <- list(xgb.model.full,xgb.model.MIN)
-#file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb.models"
+file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb.models"
 save(list.models,file=file.list.models)
 
 #office_test$Pred.26 <- predict(xgb.model.26,dtest)
