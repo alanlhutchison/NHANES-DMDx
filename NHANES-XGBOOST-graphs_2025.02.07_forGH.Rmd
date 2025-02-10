@@ -49,6 +49,7 @@ library(Hmisc)
 library(glmnet)
 library(tidymodels)
 library(data.table)
+library(htmlTable)
 
 ```
 
@@ -58,7 +59,7 @@ You can also embed plots, for example:
 
 ```{r pressure, echo=FALSE}
 
-load('df.master-2024.08.18.Rda')
+load('~/Documents/NHANES15-16/df.master-2025.02.09.Rda')
 ```
 
 
@@ -75,7 +76,9 @@ f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
 df <- df.master %>% 
   mutate(LBXIN = if_else(!is.na(LBXIN.x),LBXIN.x,LBXIN.y )) %>% select(-LBXIN.x) %>% select(-LBXIN.y) %>% 
   mutate(WTSAF2YR = if_else(!is.na(WTSAF2YR.x),WTSAF2YR.x,WTSAF2YR.y ))  %>% select(-WTSAF2YR.x) %>% select(-WTSAF2YR.y) %>% 
-  
+  dplyr::rename(Ever.Told.Overweight = MCQ080, Cuff.Size=BPACSZ) %>% 
+  rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>%
+  rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>%     
   ### We are going to update everything match 2015-2016 as best we can
   mutate(
   ### INS adjustment
@@ -109,7 +112,8 @@ df <- df.master %>%
                           ),
                    URXUCR)
   ) %>% 
-
+  rename(Masked.Var.Pseduo.Strat = SDMVSTRA,Enhance.BP1 = BPAEN1) %>%   
+  rename(Osmolality=LBXSOSSI,Num.Family=DMDFMSIZ,Arm.Length=BMXARML,BPCuff.Max.Inflation=BPXML1,Pulse.Site=BPXPTY,Globulin=LBXSGB,BP.Enhancement.3=BPAEN3,UpperLeg.Length=BMXLEG,TransfusionEver=MCQ092,Eos.Num=LBDEONO,BP.Enhancement.2=BPAEN2,CitizenStatus=DMDCITZN,Baso.Num=LBDBANO,MCHC=LBXMC,Chol.mmol=LBDSCHSI,fpg.mmol=LBDGLUSI,Calcium.mmol=LBDSCASI,UrineCr.mmol=URXCRS,Lympho.Num = LBDLYMNO,Mono.num=LBDMONO,Told.Asthma = MCQ010,BUN.mmol=LBDSBUSI,Baso.Perc=LBXBAPCT,Globulin.g.L=LBDSGBSI, BP.Ever.Told.High = BPQ020, Sleep.Ever.Told.Poor = SLQ050, ,Cr.umol = LBDSCRSI) %>% 
   rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
          sample.interview.weight = WTINT2YR,
          sample.mec.weight = WTMEC2YR,
@@ -274,24 +278,24 @@ Triceps.Skin = BMXTRI,
          sample.ogtt.weight = sample.ogtt.weight / 6,
          sample.interview.weight = sample.interview.weight / 6,
          sample.mec.weight = sample.mec.weight / 6) %>%  # combining across 6 cycles
-select(-Year.x,-Year.y)  %>%  
+#select(-Year.x,-Year.y)  %>%  
   ### Naming variables based on LASSO identification
-  rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>% 
+
   ### Excluding labels that would be artefactual or duplicative
 
   select(-Data.Release.Cycle,) %>% 
   select(-c(TProt.g.L,UrineAlb.mg.L,Tbili.umol,phosphorus.mmol,triglycerides.mmol,glucose.mmol,BP.Arm,Seg.Neut.num,gluc,UricA)) %>% 
-  rename(Osmolality=LBXSOSSI,Num.Family=DMDFMSIZ,Arm.Length=BMXARML,BPCuff.Max.Inflation=BPXML1,Pulse.Site=BPXPTY,Globulin=LBXSGB,BP.Enhancement.3=BPAEN3,UpperLeg.Length=BMXLEG,TransfusionEver=MCQ092,Eos.Num=LBDEONO,BP.Enhancement.2=BPAEN2,CitizenStatus=DMDCITZN,Baso.Num=LBDBANO,MCHC=LBXMC,Chol.mmol=LBDSCHSI,fpg.mmol=LBDGLUSI,Calcium.mmol=LBDSCASI,UrineCr.mmol=URXCRS,Lympho.Num = LBDLYMNO,Mono.num=LBDMONO,Told.Asthma = MCQ010,BUN.mmol=LBDSBUSI,Baso.Perc=LBXBAPCT,Globulin.g.L=LBDSGBSI, BP.Ever.Told.High = BPQ020, Sleep.Ever.Told.Poor = SLQ050, ,Cr.umol = LBDSCRSI) %>% 
+
   select(-c(Calcium.mmol,Chol.mmol,fpg.mmol,Baso.Num,Eos.Num,BP.Enhancement.2,Pulse.Site,BP.Enhancement.3,sample.interview.weight,BUN.mmol,sample.mec.weight,Globulin.g.L,Arm.Length,UpperLeg.Length)) %>% 
   ### PROXY AND INTERPRETER
   ### PROXY and INTERPRETER 
   mutate(Proxy.Used = f.yes1.no0(Proxy.Used),Proxy.Mec.Used=f.yes1.no0(Proxy.Mec.Used),Interpreter.SP.interview=f.yes1.no0(Interpreter.SP.interview),Interpreter.Used=f.yes1.no0(Interpreter.Used),Interpreter.MIA=f.yes1.no0(Interpreter.MIA),FIAPROXY=f.yes1.no0(FIAPROXY)) %>% rowwise() %>% mutate(PROXY=sum(Proxy.Used,Proxy.Mec.Used,na.rm=TRUE),INTERPRETER=sum(Interpreter.Used,Interpreter.MIA,Interpreter.SP.interview,na.rm=TRUE)) %>% ungroup()  %>% mutate(PROXY=as.integer(PROXY>0),INTERPRETER=as.integer(INTERPRETER>0)) %>% 
   select(-c(Proxy.Used,Proxy.Mec.Used,Interpreter.SP.interview,Interpreter.Used,Proxy.Mec.Used,Interpreter.Used,Interpreter.MIA,FIAPROXY,sample.fasting.weight,Head.Household.Age,Masked.Var.Pseduocode)) %>% 
-  rename(Masked.Var.Pseduo.Strat = SDMVSTRA,Enhance.BP1 = BPAEN1) %>% 
+
   select(-c(Masked.Var.Pseduo.Strat,Enhance.BP1,two.mmol,UrineCr.mmol,Cr.umol,Time.of.Survey)) %>% rename(RaceEth=RIDRETH1,Marriage.Status=DMDHRMAR,EduLevel=DMDHREDU) %>% 
-  rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>% 
+
   select(-c(SEQN,BMI,BPCuff.Max.Inflation,iron.umol,Lympho.Num,alb.g.L,BMDSTATS)) %>% 
-  rename(Ever.Told.Overweight = MCQ080, Cuff.Size=BPACSZ) %>% 
+  
   select(-c(Cuff.Size,RIDSTATR,Gender.HeadHousehold,INTERPRETER,PROXY,Mono.num,Num.Family)) %>% 
   ### Don't Know to Don't know
   mutate(Marriage.Status=if_else(Marriage.Status=="Don't Know","Don't know",Marriage.Status)) %>% 
@@ -308,6 +312,72 @@ select(-Year.x,-Year.y)  %>%
     #       if_else(mod.rec.yes==1,days.mod.rec*min.mod.rec,0) )
 ```
 
+
+```{r}
+df$Age %>% table()
+df$Age %>% table() %>% sum()
+df %>% nrow()
+df$PHDSESN %>% table() 
+df$PHDSESN %>% table() %>% sum()
+### Morning: 26028
+### Afternoon: 20328
+### Evening: 9769
+### NA: 4811
+is.na(df$PHDSESN) %>% sum()
+
+print('2007-2015')
+df %>% filter(Year > 2005) %>% nrow()
+df %>% filter(grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(!grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Age>11 & grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Age>11 & grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) ) %>% nrow()
+df %>% filter(Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two)) %>% pull(two) %>% table() %>% sum()
+df %>% filter(Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two),!is.na(a1c)) %>% pull(two) %>% table() %>% sum()
+df %>% filter(Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two),!is.na(a1c),!is.na(sample.ogtt.weight)) %>% pull(two) %>% table() %>% sum()
+
+print('2007-2015 Exclusion')
+df %>% filter(Year < 2007) %>% nrow()
+df %>% filter(Year > 2005,Age < 12) %>% nrow()
+df %>% filter(Year > 2005,Age>11,!grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Year > 2005,Age>11 & grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Year > 2005,Age>11 & grepl('orning',df$PHDSESN)) %>% nrow()
+df %>% filter(Year > 2005 & Age>11 & grepl('orning',PHDSESN) & !grepl('OGTT',ogtt.incomplete) ) %>% nrow()
+df %>% filter(Year > 2005 & Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two)) %>% pull(two) %>% table() %>% sum()
+df %>% filter(Year > 2005,Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two),is.na(a1c)) %>% pull(two) %>% table() %>% sum()
+df %>% filter(Year > 2005,Age>11 & grepl('orning',PHDSESN) & grepl('OGTT',ogtt.incomplete) )%>% filter(!is.na(two),!is.na(a1c),!is.na(sample.ogtt.weight)) %>% pull(two) %>% table() %>% sum()
+
+df %>% filter(Year > 2005 & Age>11 & grepl('orning',PHDSESN) & !grepl('OGTT',ogtt.incomplete) ) %>% filter(is.na(ogtt.incomplete)) %>% nrow()
+df %>% filter(Year > 2005 & Age>11 & grepl('orning',PHDSESN) & !grepl('OGTT',ogtt.incomplete) ) %>% pull(ogtt.incomplete) %>% table() %>% sum()
+
+df %>% mutate(ogtt.incomplete=ifelse(is.na(ogtt.incomplete),"NA",ogtt.incomplete)) %>%  select(ogtt.incomplete,Year) %>% table()
+df$ogtt.incomplete %>% table()
+is.na(df$ogtt.incomplete) %>% sum()
+
+print('2005')
+df %>% filter(Year==2005) %>% nrow()
+df %>% filter(Year==2005,Age < 12) %>% nrow()
+df %>% filter(Year==2005 & Age > 11 & !grepl('orning',PHDSESN)) %>% nrow()
+df %>% filter(Year==2005 & Age > 11 & grepl('orning',PHDSESN)) %>% filter(is.na(two)) %>% nrow()
+df %>% filter(Year==2005 & Age > 11 & grepl('orning',PHDSESN)) %>% filter(!is.na(two),is.na(a1c)) %>% nrow()
+df %>% filter(Year==2005 & Age > 11 & grepl('orning',PHDSESN)) %>% filter(!is.na(two),!is.na(a1c),is.na(sample.ogtt.weight)) %>% nrow()
+
+df %>% filter(Year==2005) %>% filter(is.na(two)) %>% pull(two) %>% length()
+df %>% filter(Year==2005) %>% filter(!is.na(two),!is.na(a1c)) %>% pull(two) %>% table() %>% sum()
+df %>% filter(Year==2005) %>% filter(!is.na(two),!is.na(a1c),!is.na(sample.ogtt.weight)) %>% pull(two) %>% table() %>% sum()
+
+```
+
+
+```{r}
+
+df.master$GTDCODE %>% length()
+df.master$GTDCODE %>% table() %>% data.frame()  #%>% mutate(OGTT.Complete = `OGTT Complete` + `OGTT complete`)
+
+#PHDSESN
+df.master$PH %>% table()
+
+```
 
 
 ```{r}
@@ -435,6 +505,24 @@ ggsave('~/Dropbox/NHANES manuscript/Feature-Importance.png', plot.import.full, w
 ```
 
 ```{r}
+plot.import.full<- df.imp %>% arrange(Gain) %>% mutate(Feature=factor(Feature,levels=Feature)) %>% ggplot() + geom_col(aes(x=Feature,y=Gain))  + coord_flip() + labs(title="Importance Plot - Top 20 features") + theme(plot.title = element_text(hjust = 0.5,size=8),
+      plot.subtitle = element_text(hjust = 0.5,size=8),
+      text  = element_text(size=8),
+      axis.text.y = element_text(size=8),
+      axis.text.x = element_text(size=8))
+
+print(plot.import.full)
+
+ggsave('~/Dropbox/K23/Importance.png', plot.import.full, width = 3.2, height = 2.35, units = "in")
+```
+
+
+```{r}
+df.imp %>% arrange(desc(Gain)) %>% mutate(Feature=factor(Feature,levels=Feature)) 
+```
+
+
+```{r}
 library(htmlTable)
 library(Gmisc)
 ```
@@ -499,6 +587,13 @@ paste("Diabetes Dx by OGTT:", df.sampled %>% filter(two>=200) %>% nrow() / 10000
 paste("Diabetes Dx by A1c:", df.sampled %>% filter(a1c>=6.5) %>% nrow() / 100000 ) 
 paste("Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c>=6.5 & two < 200) %>% nrow() / 100000 ) 
 paste("Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5 & two >= 200) %>% nrow() / 100000 ) 
+
+print('')
+paste("Pre-Diabetes Dx by Both:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 )| (two<200 & two>=140)) %>% nrow() / 100000 ) 
+paste("Pre-Diabetes Dx by OGTT:", df.sampled %>% filter((two<200 & two>=140)) %>% nrow() / 100000 ) 
+paste("Pre-Diabetes Dx by A1c:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 )) %>% nrow() / 100000 ) 
+paste("Pre-Diabetes Dx by A1c not OGTT:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 ) & two < 140) %>% nrow() / 100000 ) 
+paste("Pre-Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<5.7 & (two<200 & two>=140)) %>% nrow() / 100000 ) 
 
 
 
@@ -1147,6 +1242,7 @@ office_test.eGFR <- office_test
   
 yy <- office_test.All
 x0.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x0.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="All")
 x0.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="All")
 x0.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="All")
 x0.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="All")
@@ -1154,6 +1250,7 @@ x0.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",D
 
 yy <- office_test.Age
 x1.yy.pdm<-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x1.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="Age>60")
 x1.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="Age>60")
 x1.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="Age>60")
 x1.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="Age>60")
@@ -1161,18 +1258,21 @@ x1.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",D
 
 yy <- office_test.BMI
 x2.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x2.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="BMI>30")
 x2.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="BMI>30")
 x2.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm))  %>% mutate(Stat="Min",Dx="pdm",Cohort="BMI>30")
 x2.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="BMI>30")
 
 yy <- office_test.WC  
 x3.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x3.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="WC>110")
 x3.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="WC>110")
 x3.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="WC>110")
 x3.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="WC>110")
 
 yy <- office_test.FIB4
 x4.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x4.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="FIB4>2.67")
 x4.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="FIB4>2.67")
 x4.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="FIB4>2.67")
 x4.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="FIB4>2.67")
@@ -1180,12 +1280,14 @@ x4.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",D
 
 yy <- office_test.eGFR
 x5.yy.pdm <-yy.pdm <-  factor(yy$two >=140 & yy$two<200)
+x5.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="eGFR<60")
 x5.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="eGFR<60")
 x5.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="eGFR<60")
 x5.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="eGFR<60")
 
 yy <- office_test.SBP
 x6.yy.pdm <- yy.pdm <-  factor(yy$two >=140 & yy$two<200)# %>% as.data.frame() %>% mutate(Stat="A1c",Dx="pdm",Cohort="SBP>140")
+x6.pdm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.pdm)) %>% mutate(Stat="FPG",Dx="pdm",Cohort="SBP>140")
 x6.pdm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.pdm)) %>% mutate(Stat="A1c",Dx="pdm",Cohort="SBP>140")
 x6.pdm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.pdm)) %>% mutate(Stat="Min",Dx="pdm",Cohort="SBP>140")
 x6.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",Dx="pdm",Cohort="SBP>140")
@@ -1195,14 +1297,17 @@ x6.pdm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.pdm))  %>% mutate(Stat="Full",D
 
 roc.pdm.cohort <-bind_rows(
   x0.pdm.roc.a1c ,
+  x0.pdm.roc.fpg ,  
 x0.pdm.roc.min,
 x0.pdm.roc.full,
 
 x1.pdm.roc.a1c,
+x1.pdm.roc.fpg,
 x1.pdm.roc.min,
 x1.pdm.roc.full,
 
 x2.pdm.roc.a1c,
+x2.pdm.roc.fpg,
 x2.pdm.roc.min,
 x2.pdm.roc.full,
 
@@ -1210,14 +1315,17 @@ x2.pdm.roc.full,
 # x3.pdm.roc.min,
 
 x4.pdm.roc.a1c,
+x4.pdm.roc.fpg,
 x4.pdm.roc.min,
 x4.pdm.roc.full,
 
 x5.pdm.roc.a1c,
+x5.pdm.roc.fpg,
 x5.pdm.roc.min,
 x5.pdm.roc.full,
 
 x6.pdm.roc.a1c,
+x6.pdm.roc.fpg,
 x6.pdm.roc.min,
 x6.pdm.roc.full,
 
@@ -1228,42 +1336,49 @@ x6.pdm.roc.full,
 yy <- office_test.All
 yy.dm <-  factor(yy$two >= 200)
 x0.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="All")
+x0.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="All")
 x0.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="All")
 x0.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="All")
 
 yy <- office_test.Age
 yy.dm <-  factor(yy$two >= 200)
 x1.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="Age>60")
+x1.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="Age>60")
 x1.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="Age>60")
 x1.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="Age>60")
 
 yy <- office_test.BMI
 yy.dm <-  factor(yy$two >= 200)
 x2.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="BMI>30")
+x2.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="BMI>30")
 x2.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm))  %>% mutate(Stat="Min",Dx="DM",Cohort="BMI>30")
 x2.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="BMI>30")
 
 yy <- office_test.WC  
 yy.dm <-  factor(yy$two >= 200)
 x3.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="WC>110")
+x3.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="WC>110")
 x3.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="WC>110")
 x3.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="WC>110")
 
 yy <- office_test.FIB4
 yy.dm <-  factor(yy$two >= 200)
 x4.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="FIB4>2.67")
+x4.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="FIB4>2.67")
 x4.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="FIB4>2.67")
 x4.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="FIB4>2.67")
 
 yy <- office_test.GGT
 yy.dm <-  factor(yy$two >= 200)
 x5.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="eGFR<60")
+x5.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="eGFR<60")
 x5.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="eGFR<60")
 x5.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="eGFR<60")
 
 yy <- office_test.SBP
 yy.dm <-  factor(yy$two >= 200)
 x6.dm.roc.a1c <- tidy(AUC::roc(yy$a1c,yy.dm)) %>% mutate(Stat="A1c",Dx="DM",Cohort="SBP>140")
+x6.dm.roc.fpg <- tidy(AUC::roc(yy$fpg,yy.dm)) %>% mutate(Stat="FPG",Dx="DM",Cohort="SBP>140")
 x6.dm.roc.min <- tidy(AUC::roc(yy$Pred.MIN,yy.dm)) %>% mutate(Stat="Min",Dx="DM",Cohort="SBP>140")
 x6.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx="DM",Cohort="SBP>140")
 
@@ -1272,15 +1387,18 @@ x6.dm.roc.full <- tidy(AUC::roc(yy$Pred.Full,yy.dm))  %>% mutate(Stat="Full",Dx=
 
 
 roc.dm.cohort <-bind_rows(
-  x0.dm.roc.a1c ,
+x0.dm.roc.a1c ,
+x0.dm.roc.fpg ,
 x0.dm.roc.min,
 x0.dm.roc.full,
 
 x1.dm.roc.a1c,
+x1.dm.roc.fpg ,
 x1.dm.roc.min,
 x1.dm.roc.full,
 
 x2.dm.roc.a1c,
+x2.dm.roc.fpg ,
 x2.dm.roc.min,
 x2.dm.roc.full,
 
@@ -1288,39 +1406,39 @@ x2.dm.roc.full,
 #x3.dm.roc.min,
 
 x4.dm.roc.a1c,
+x4.dm.roc.fpg ,
 x4.dm.roc.min,
 x4.dm.roc.full,
 
 x5.dm.roc.a1c,
+x5.dm.roc.fpg ,
 x5.dm.roc.min,
 x5.dm.roc.full,
 
 x6.dm.roc.a1c,
+x6.dm.roc.fpg ,
 x6.dm.roc.min,
 x6.dm.roc.full
 ) 
 
 
 library(ggrepel)
-plot.pdm.cohort.roc <- roc.pdm.cohort %>% bind_rows(roc.pdm.cohort  %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% filter(Stat=="A1c" | Stat=="Min") %>% 
+plot.pdm.cohort.roc <- roc.pdm.cohort %>% bind_rows(roc.pdm.cohort  %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% filter(Stat=="A1c" | Stat=="Min"| Stat=="FPG") %>% 
   ggplot() + geom_line(aes(x=fpr,y=tpr,color=Cohort,linetype=Stat))  +
- geom_point(data=. %>% filter(!is.na(Best)),aes(label=paste0(round(fpr,2),', ',round(tpr,2)),x=fpr,y=tpr,color=Cohort,shape=Stat),size=2) +   
-  geom_text_repel(data=. %>% filter(!is.na(Best)),aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2) + 
+ #geom_point(data=. %>% filter(!is.na(Best)),aes(label=paste0(round(fpr,2),', ',round(tpr,2)),x=fpr,y=tpr,color=Cohort,shape=Stat),size=2) +   
+  #geom_text_repel(data=. %>% filter(!is.na(Best)),aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2) + 
   geom_abline(aes(slope=1,intercept=0),linetype="dotted")+ facet_wrap(~Cohort)  + labs(title="Pre-Diabetes Diagnosis") + xlab("1-Specificity") + ylab("Sensitivity") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 
 plot.dm.cohort.roc <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% 
-                                                    mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>%   filter(Stat=="A1c" | Stat=="Min") %>% 
+                                                    mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>%   filter(Stat=="A1c" | Stat=="Min" | Stat=="FPG") %>% 
  ggplot(aes(x=fpr,y=tpr,color=Cohort,linetype=Stat,shape=Stat)) + geom_line() +
- geom_point(data=. %>% filter(!is.na(Best)),
-            aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
-  geom_text_repel(data=. %>% filter(!is.na(Best)),
-                  aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2,color='black') + 
+ #geom_point(data=. %>% filter(!is.na(Best)),aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
+  #geom_text_repel(data=. %>% filter(!is.na(Best)),aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=2,color='black') + 
   geom_abline(aes(slope=1,intercept=0),linetype="dotted") + facet_wrap(~Cohort) + labs(title="Diabetes Diagnosis") + xlab("1-Specificity") + ylab("Sensitivity") + theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
 
 
-grid.plot.cohort.roc<-grid.arrange(plot.pdm.cohort.roc,plot.dm.cohort.roc,ncol=2)
-ggsave(file='~/Dropbox/NHANES manuscript/Grid-PreDM-DM-Cohorts-MinvA1c.jpg',plot=grid.plot.cohort.roc)
-
+grid.plot.cohort.roc<-grid.arrange(plot.pdm.cohort.roc,plot.dm.cohort.roc,ncol=2);print(grid.plot.cohort.roc)
+ggsave(file='~/Dropbox/NHANES manuscript/Grid-PreDM-DM-Cohorts-MinvA1cvFPG.jpg',plot=grid.plot.cohort.roc)
 
 
 plot.roc.abstract <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
@@ -1334,12 +1452,12 @@ bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) 
                   aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr)) + 
   geom_abline(aes(slope=1,intercept=0),linetype="dotted") + labs(title="Receiver Operator Curves",linetype="Method",shape="Method") + xlab("1-Specificity") + ylab("Sensitivity") + 
   scale_color_manual(values=c("Diabetes"="maroon","Pre-Diabetes"="green")) ; print(plot.roc.abstract)
-ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1cvFull.jpg',plot=plot.roc.abstract)
+ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1cvFullvsFPG.jpg',plot=plot.roc.abstract)
 
 plot.roc.abstract <- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
 bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) ) %>% 
  filter(Cohort=="All") %>% 
-  mutate(Diagnosis=if_else(Dx=="DM","Diabetes","Pre-Diabetes")) %>% filter(Stat=="Min" |Stat=="A1c") %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
+  mutate(Diagnosis=if_else(Dx=="DM","Diabetes","Pre-Diabetes")) %>% filter(Stat=="Min" |Stat=="A1c" | Stat=="FPG") %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
  ggplot(aes(x=fpr,y=tpr,linetype=Stat,shape=Stat,color=Diagnosis)) + geom_line() +
  geom_point(data=. %>% filter(!is.na(Best)),
             aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
@@ -1354,11 +1472,63 @@ ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1c.jpg',plot=plot.roc.abst
 #roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% mutate(PPV = tpr/)
 ```
 
+```{r}
+x0.pdm.roc.fpg %>% arrange(cutoff)
+```
+
+```{r}
+plt.roc.manu.fpg<- roc.dm.cohort %>% bind_rows(roc.pdm.cohort) %>% # %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
+#bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) ) %>% 
+ filter(Cohort=="All") %>% 
+  mutate(Diagnosis=if_else(Dx=="DM","Diabetes","Pre-Diabetes")) %>% filter(Stat=="Min" |Stat=="A1c" | Stat=="FPG") %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
+ ggplot(aes(x=fpr,y=tpr,linetype=Stat,shape=Stat,color=Diagnosis)) + geom_line() +
+ #geom_point(data=. %>% filter(!is.na(Best)),
+#            aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
+ # geom_text_repel(data=. %>% filter(!is.na(Best)),
+#                  aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=3) + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted") + labs(title="Receiver Operator Curves",linetype="Method",shape="Method") + xlab("1-Specificity") + ylab("Sensitivity") + 
+  scale_color_manual(values=c("Diabetes"="maroon","Pre-Diabetes"="darkgreen")); print(plt.roc.manu.fpg)
+
+ggsave('~/Dropbox/NHANES manuscript/ROC-PreDM-DM-MinvA1cvFPG.jpg',plot=plt.roc.manu.fpg)
+```
+
+
+
+
+```{r For K23}
+plot.roc.K23<- roc.dm.cohort %>% bind_rows(roc.dm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) %>% 
+bind_rows(roc.pdm.cohort %>% bind_rows(roc.pdm.cohort %>% group_by(Cohort,Stat) %>% mutate(Best = tpr - fpr) %>% filter(Best==max(Best)) ) ) %>% 
+ filter(Cohort=="All") %>% 
+  mutate(Diagnosis=if_else(Dx=="DM","DM","Pre-DM")) %>% filter(Stat=="Min" |Stat=="A1c") %>% mutate(Stat=if_else(Stat=="Min","Model",Stat)) %>% 
+ ggplot(aes(x=fpr,y=tpr,linetype=Stat,shape=Stat,color=Diagnosis)) + geom_line() +
+ #geom_point(data=. %>% filter(!is.na(Best)),aes(label=paste0(round(fpr,2),', ',round(tpr,2))),size=2) +   
+  #geom_text_repel(data=. %>% filter(!is.na(Best)),aes(label=paste0("(",round(fpr,2),', ',round(tpr,2),")"),x=fpr,y=tpr),size=3) + 
+  geom_abline(aes(slope=1,intercept=0),linetype="dotted") + 
+  labs(linetype="Method",shape="Method") + xlab("1-Specificity") + ylab("Sensitivity") + 
+  scale_color_manual(values=c("DM"="maroon","Pre-DM"="darkgreen")) + 
+        theme(axis.text=element_text(size=8),
+              axis.title=element_text(size=8),
+              legend.text=element_text(size=8,margin=margin(l=unit(0.001,'in'))),
+              legend.title=element_text(size=8,margin=margin(b=unit(0.001,'in'))),
+              legend.margin = unit(0.05,'in'),
+              plot.title = element_text(size=8),
+              legend.spacing.x = unit(0.001, 'in'),              
+              legend.spacing.y = unit(0.001, 'in'),
+              legend.key.size = unit(0.15, "in"),
+              legend.box.spacing=unit(0.01,"in"),
+              legend.key.spacing.x=unit(0.005,"in"),
+              legend.key.spacing.y=unit(0.005,"in")) ; print(plot.roc.K23)
+
+ggsave('~/Dropbox/K23/ROC.jpg',plot=plot.roc.K23,units=c("in"),height=1.3,width=2.2)
+```
+
+
 
 ```{r Getting the AUROCs}
 
 yy <- office_test.All
 x0.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x0.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x0.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
 x0.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x0.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
@@ -1366,17 +1536,20 @@ x0.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 yy <- office_test.Age
 x1.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
 x1.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x1.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x1.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x1.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 
 yy <- office_test.BMI
 x2.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x2.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x2.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
 x2.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x2.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 
 yy <- office_test.WC  
 x3.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
+x3.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x3.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
 x3.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x3.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
@@ -1384,18 +1557,21 @@ x3.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 yy <- office_test.FIB4
 x4.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
 x4.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x4.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x4.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x4.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 
 yy <- office_test.eGFR
 x5.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
 x5.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x5.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x5.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x5.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 
 yy <- office_test.SBP
 x6.yy.pdm <- yy.pdm <- factor(yy$two >=140 & yy$two<200)
 x6.pdm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.pdm))
+x6.pdm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.pdm))
 x6.pdm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.pdm))
 x6.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 
@@ -1403,41 +1579,48 @@ x6.pdm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.pdm))
 yy <- office_test.All
 yy.dm <- factor(yy$two >= 200)
 x0.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
+x0.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x0.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x0.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.Age
 yy.dm <- factor(yy$two >= 200)
+x1.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x1.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x1.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x1.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.BMI
 yy.dm <- factor(yy$two >= 200)
+x2.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x2.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x2.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x2.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.WC  
 yy.dm <- factor(yy$two >= 200)
+x3.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x3.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x3.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x3.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.FIB4
 yy.dm <- factor(yy$two >= 200)
+x4.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x4.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x4.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x4.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.GGT
 yy.dm <- factor(yy$two >= 200)
+x5.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x5.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x5.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x5.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 
 yy <- office_test.SBP
 yy.dm <- factor(yy$two >= 200)
+x6.dm.auroc.fpg <- auc(AUC::roc(yy$fpg, yy.dm))
 x6.dm.auroc.a1c <- auc(AUC::roc(yy$a1c, yy.dm))
 x6.dm.auroc.min <- auc(AUC::roc(yy$Pred.MIN, yy.dm))
 x6.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
@@ -1449,6 +1632,10 @@ x6.dm.auroc.full <- auc(AUC::roc(yy$Pred.Full, yy.dm))
 # Create a data frame with PDM and DM side by side
 combined_auroc_table <- data.frame(
   Cohort = c("All", "Age>60", "BMI>30", "WC>110", "FIB4>2.67", "eGFR<60", "SBP>140"),
+  AUROC_FPG_PDM = round(c(x0.pdm.auroc.fpg, x1.pdm.auroc.fpg, x2.pdm.auroc.fpg, x3.pdm.auroc.fpg, 
+                           x4.pdm.auroc.fpg, x5.pdm.auroc.fpg, x6.pdm.auroc.fpg), 3),
+  AUROC_FPG_DM  = round(c(x0.dm.auroc.fpg, x1.dm.auroc.fpg, x2.dm.auroc.fpg, x3.dm.auroc.fpg, 
+                           x4.dm.auroc.fpg, x5.dm.auroc.fpg, x6.dm.auroc.fpg), 3),
   AUROC_A1c_PDM = round(c(x0.pdm.auroc.a1c, x1.pdm.auroc.a1c, x2.pdm.auroc.a1c, x3.pdm.auroc.a1c, 
                            x4.pdm.auroc.a1c, x5.pdm.auroc.a1c, x6.pdm.auroc.a1c), 3),
   AUROC_A1c_DM  = round(c(x0.dm.auroc.a1c, x1.dm.auroc.a1c, x2.dm.auroc.a1c, x3.dm.auroc.a1c, 
@@ -2122,3 +2309,26 @@ legend2
 ggsave(file="~/Dropbox/NHANES manuscript/TPFP-Cohorts-A1c-vs-Model.jpg",plot=plot.tpfp.cohorts)
 
 ```
+
+
+
+```{r}
+office_test.All %>% mutate(a1c_range=cut(a1c,c(4,8,12,16))) %>% ggplot()+ geom_point(aes(x=a1c,y=two,color=a1c),alpha=0.5) + geom_abline(aes(slope=1,intercept=0)) + ylim(c(50,500)) + scale_color_viridis()
+
+
+plt.calibration<-office_test.All %>% mutate(a1c_range=cut(a1c,c(4,8,12,16)))    %>% 
+  ggplot()+ 
+  geom_point(aes(x=Pred.MIN,y=two),alpha=1) + 
+  geom_point(data=office_test.All %>% filter(a1c<6.5),aes(x=Pred.MIN,y=two,color=a1c),alpha=1) +  
+  geom_abline(aes(slope=1,intercept=0))+ xlim(c(50,500)) + ylim(c(50,500)) + scale_color_viridis(name='Hemoglobin\nA1c (%)') + 
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose (mg/dL)");plot(plt.calibration)
+
+ggsave(file='~/Dropbox/NHANES manuscript/Calibration.jpg',plot=plt.calibration)
+
+cor(office_test.All$two,office_test.All$Pred.MIN)^2
+
+
+```
+
+
+

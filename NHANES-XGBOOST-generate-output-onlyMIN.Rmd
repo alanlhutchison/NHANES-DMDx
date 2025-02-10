@@ -407,9 +407,10 @@ file.dca.min = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA_min-
 
 df.nas <-lapply(df.small,function(x) (sum(!is.na(x))))  %>% data.frame()  %>% t() %>% data.frame()
 names(df.nas) <- 'Col1'
+df.nas$rownames <- rownames(df.nas)
 df.nas %>% dim()
 
-df.small <- df.small[,df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% rownames()] 
+df.small <- df.small[,df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% pull(rownames)] 
 
 
 office_train <- df.small %>% filter(Year < 2015) #training(office_split)
@@ -646,6 +647,8 @@ Var.Other.3 <- c("ggt","phos","u.alb", "u.cr","choles","HepB.sAb","HepB.cAb")
 Var.MIN <- c("fpg", "Age", "a1c", "insulin", "Height.Stand", "tgy", "SBP", "Waist.Circ", "choles", "u.alb", "cr", "u.cr", "DBP", "Poverty.Ratio", "Seg.Neut.perc", "pulse", "iron", "Arm.Circ", "plt", "ggt")
 
 VAR.MIN.2 <- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% head(20) %>% select(Feature) %>% pull(Feature)
+
+VAR.MIN.3 <- c("fpg","a1c")
 ### BASE: Clinic + Hx CBC + CMP + Hx
 ### + Fasting
 ### + Urine + Var.Other.1+ Var.Other.2 vs  + SDOH
@@ -984,14 +987,14 @@ VAR.MIN.2,add_total_col = FALSE,) %>%
 # office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
 
 ### MIN MODEL
-
-
-office_train.MIN <- office_train %>% select(all_of(c(VAR.MIN.2 )))
+## Can put which ever VAR.MIN.2 vs VAR.MIN.3
+VAR.MIN.3 = c('fpg','a1c')
+office_train.MIN <- office_train %>% select(all_of(c(VAR.MIN.3 )))
 
 office_train.makeX <- makeX(office_train.MIN)
 dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
 
-office_test.MIN <- office_test %>% select(all_of(c(VAR.MIN.2 )))
+office_test.MIN <- office_test %>% select(all_of(c(VAR.MIN.3 )))
 
 office_test.makeX <-  makeX(office_test.MIN)
 office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
@@ -1028,18 +1031,18 @@ office_test$two <- label.test
 office_test$sample.ogtt.weight <-  weight.sample.test
 
 ### This is a Rda of the office_test data frame 
-#file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2024.11.22.Rda'
+file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2025.02.09.Rda'
 save(office_train,file=file.office.train)
 
 ### This is a Rda of the office_test data frame 
 
-#file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2024.11.22.Rda'
+file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2024.02.09.Rda'
 save(office_test,file=file.office.test)
 
 ### This is a list of all the models in question
 #list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2,xgb.model.MIN)
 list.models <- list(xgb.model.full,xgb.model.MIN)
-file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb.models"
+file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb_2025.02.09.models"
 save(list.models,file=file.list.models)
 
 #office_test$Pred.26 <- predict(xgb.model.26,dtest)
