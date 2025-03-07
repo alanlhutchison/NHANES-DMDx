@@ -58,13 +58,13 @@ You can also embed plots, for example:
 
 ```{r pressure, echo=FALSE}
 
-load('df.master-2024.08.18.Rda')
+load('df.master-2025.02.09.Rda')
 ```
 
 
 
 
-```{r Making DF.MASTER}
+```{r Making DF from DF.MASTER}
 
 f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
 # Throwing out BP reading below 20
@@ -274,7 +274,7 @@ Triceps.Skin = BMXTRI,
          sample.ogtt.weight = sample.ogtt.weight / 6,
          sample.interview.weight = sample.interview.weight / 6,
          sample.mec.weight = sample.mec.weight / 6) %>%  # combining across 6 cycles
-select(-Year.x,-Year.y)  %>%  
+#select(-Year.x,-Year.y)  %>%  
   ### Naming variables based on LASSO identification
   rename(Seg.Neut.perc=LBXNEPCT, Data.Release.Cycle=SDDSRVYR, Head.Household.Age=DMDHRAGE, Hydroxycontine=LBXHCT, Proxy.Used=SIAPROXY, eosin.perc=LBXEOPCT, Interpreter.Used=FIAINTRP, Proxy.Mec.Used=MIAPROXY, Monocyte.perc=LBXMOPCT, Interpreter.SP.interview=SIAINTRP, RBC.Dist.Width=LBXRDW,BP.Arm=BPAARM,  Anemia.Treatment=MCQ053, Time.of.Survey=RIDEXMON, Masked.Var.Pseduocode=SDMVPSU, Interpreter.MIA=MIAINTRP, Num.People.Household=DMDHHSIZ, Gender.HeadHousehold=DMDHRGND, glucose.mmol=LBDSGLSI, Poverty.Ratio=INDFMPIR, triglycerides.mmol=LBDSTRSI,Mean.Cell.Hemoglobin =LBXMCHSI, phosphorus.mmol=LBDSPHSI, Seg.Neut.num=LBDNENO, UricA=LBDSUASI, Tbili.umol=LBDSTBSI, UrineAlb.mg.L=URXUMS, TProt.g.L=LBDSTPSI) %>% 
   ### Excluding labels that would be artefactual or duplicative
@@ -309,14 +309,6 @@ rename(Lymph.Perc = LBXLYPCT,iron.umol=LBDSIRSI,alb.g.L=LBDSALSI) %>%
 ```
 
 
-```{r}
-
-
-
-    
-```
-
-
 
 
 ```{r FILTER ON SOMETHING}
@@ -332,7 +324,7 @@ df.small <- df %>% drop_na(a1c,two,sample.ogtt.weight)
 
 
 dir.string <-"~/Documents/NHANES15-16/"
-
+date.string <- "2025.02.25"
 filter.string <- "all"
 df.small <- df.small
 
@@ -383,27 +375,16 @@ df.small <- df.small
 
 
 
-file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_wIns_MIN_",filter.string,"_2025.02.06.Rda")
-file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_MIN_",filter.string,"_2025.02.06.Rda")
-file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_MIN_",filter.string,"_2025.02.06.Rda")
-file.list.models <- paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All-xgb.models")
-
-
-file.ROCs=paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All_ROCs.bmp" )
-file.importance.plots = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-ImportancePlots.bmp" )
-file.dca.all = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA-all.bmp" )
-file.dca.fib4 = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA_FIB4.bmp" )
-
-file.dca.min = paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-DCA_min-set.bmp" )
+file.xgb_tuned.full <- paste0(dir.string,"NHANES-training-XGBOOST_xgb_tuned_wIns_MIN_",filter.string,"_",date.string,".Rda")
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_wIns_MIN_",filter.string,"_",date.string,".Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_wIns_MIN_",filter.string,"_",date.string,".Rda")
+file.list.models <- paste0(dir.string,"NHANES-A1c-wIns_MIN_",filter.string,"-All-xgb.models_",date.string,".Rda")
 
 
 ```
 
 
-```{r}
-
-
-
+```{r Prep XGBOOST 1: Assign labels }
 
 df.nas <-lapply(df.small,function(x) (sum(!is.na(x))))  %>% data.frame()  %>% t() %>% data.frame()
 names(df.nas) <- 'Col1'
@@ -411,7 +392,6 @@ df.nas$rownames <- rownames(df.nas)
 df.nas %>% dim()
 
 df.small <- df.small[,df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% pull(rownames)] 
-
 
 office_train <- df.small %>% filter(Year < 2015) #training(office_split)
 office_test <- df.small %>% filter(Year == 2015) # testing(office_split)
@@ -424,13 +404,10 @@ weight.sample.train <- office_train$sample.ogtt.weight
 weight.sample.test <- office_test$sample.ogtt.weight
 office_train <- office_train %>% select(-c(sample.ogtt.weight,Year,two))
 office_test <- office_test %>% select(-c(sample.ogtt.weight,Year,two))
-
-
-
 ```
 
 
-```{r}
+```{r Resample NHANES data}
 # XGBoost requires the data to be in xgb.DMatrix format
 set.seed(1234)
 int.resample.train <- resample(seq(1,dim(office_train)[1]),probs=weight.sample.train/sum(weight.sample.train),size=10000)
@@ -442,6 +419,10 @@ label.train.resampled <- label.train[int.resample.train]
 label.test.resampled <- label.test[int.resample.test]
 #dtrain <- xgb.DMatrix(data = makeX(office_train.resampled), label = label.train[int.resample.train])
 #dtest <- xgb.DMatrix(data = makeX(office_test.resampled), label = label.test[int.resample.test])
+```
+
+
+```{r Prearing XGBOOST 2: makeX & confirm columns}
 
 office_train.makeX <- makeX(office_train)
 dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
@@ -482,8 +463,6 @@ f.add.makeX.columns <- function(x){
 
 office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
 
-
-
 office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
 
 dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
@@ -501,41 +480,8 @@ dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
 
 
 ```{r}
-###
-tune_grid.25 <- expand.grid(
-  nrounds = c(200,500,800),
-  eta = c(0.01,0.02),
-  max_depth = c(4,6),
-  subsample = c(0.5,0.9),
-  colsample_bytree = c(0.3,0.6,0.9),# bounded at maximum 1
-  min_child_weight = c(1),
-  gamma = c(0)
-)
 
-
-tune_grid.27 <- expand.grid(
-  nrounds = c(1500,2000),
-  eta = c(0.01,0.05),
-  max_depth = c(6),
-  subsample = c(0.6),
-  colsample_bytree = c(0.6),# bounded at maximum 1
-  min_child_weight = c(1),
-  gamma = c(0)
-)
-
-tune_grid.28 <- expand.grid(
-  nrounds = c(2000),
-  eta = c(0.05),
-  max_depth = c(6,8),
-  subsample = c(0.6,0.8),
-  colsample_bytree = c(0.6),# bounded at maximum 1
-  min_child_weight = c(1),
-  gamma = c(0)
-)
-
-
-
-tune_grid.29 <- expand.grid(
+tune_grid <- expand.grid(
   nrounds = c(2000),
   eta = c(0.05),
   max_depth = c(6),
@@ -553,13 +499,13 @@ train_control <- trainControl(method = "cv",
 ### nrounds =2000 with eta = 0.05
 weight.sample.train.norm <- weight.sample.train / sum(weight.sample.train)
 #Use caret to tune
-xgb_tuned.full.29 <- caret::train(
+xgb_tuned.full <- caret::train(
   method = "xgbTree",
   x= makeX(office_train),
   y = label.train,
   tuneLength = 1,
   trControl = train_control,
-  tuneGrid = tune_grid.29,
+  tuneGrid = tune_grid,
   metric = "RMSE",
   weights = weight.sample.train.norm,
   verbose=TRUE
@@ -570,8 +516,8 @@ xgb_tuned.full.29 <- caret::train(
 
 ```{r}
 
-#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned.29_2025.02.06.Rda"
-save(xgb_tuned.full.29,file=file.xgb_tuned.full)
+#file.xgb_tuned.full <- "~/Documents/NHANES15-16/NHANES-training-XGBOOST_xgb_tuned_2025.02.06.Rda"
+save(xgb_tuned.full,file=file.xgb_tuned.full)
 
 #load(file=file.xgb_tuned.full)
 #xgb_tuned <- xgb_tuned.25
@@ -584,27 +530,29 @@ save(xgb_tuned.full.29,file=file.xgb_tuned.full)
 ```
 
 
-```{r}
-#xgb.model.full <- xgb_tuned.full.29
-office_train.makeX <- makeX(office_train)
-office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+```{r Train FULL model}
+#xgb.model.full <- xgb_tuned.full
 
-
-office_test.makeX <- makeX(office_test)
-
-office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
+### THIS IS ALL DONE ABOVE
+# office_train.makeX <- makeX(office_train)
+# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
+# 
+# 
+# office_test.makeX <- makeX(office_test)
+# 
+# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
 
 
 #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
 
-office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
+#office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
 
+#dtest <- xgb.DMatrix(data = office_test.makeX, label = label.test)
 
-
+### THIS IS NEW
 dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-dtest <- xgb.DMatrix(data = office_test.makeX, label = label.test)
 
-xgb.model.full<- xgboost::xgb.train(params=xgb_tuned.full.29$bestTune %>% flatten(),dtrain,nrounds=2000)
+xgb.model.full<- xgboost::xgb.train(params=xgb_tuned.full$bestTune %>% flatten(),dtrain,nrounds=2000)
 
 sum(colnames(dtrain) %in% colnames(dtest))
 sum(colnames(dtrain)==colnames(dtest))
@@ -612,22 +560,19 @@ colnames(dtrain)[!colnames(dtrain) %in% colnames(dtest)]
 colnames(dtest)[!colnames(dtrain) %in% colnames(dtest)]
 colnames(dtest)[!colnames(dtest) %in% colnames(dtrain)]
 colnames(dtest)[!colnames(dtest) %in% xgb.model.full$feature_names]
+```
 
+
+```{r Predict FULL model}
 office_test$Pred.Full <- predict(xgb.model.full,dtest)
-
-
 
 xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full)
 
 ```
 
-```{r}
-colnames(office_train.makeX)[!colnames(office_train.makeX) %in% colnames(office_test.makeX)]
-
-```
 
 
-```{r}
+```{r DEFINE VARIABLE GROUPS}
 
 
 Var.Clinic = c("Age","Gender","pulse","SBP","DBP","Height.Stand","Weight","Waist.Circ","Arm.Circ","reg.iregg")
@@ -648,380 +593,102 @@ Var.MIN <- c("fpg", "Age", "a1c", "insulin", "Height.Stand", "tgy", "SBP", "Wais
 
 VAR.MIN.2 <- xgb.importance(feature_names = colnames(xgb.model.full),model=xgb.model.full) %>% head(20) %>% select(Feature) %>% pull(Feature)
 
-VAR.MIN.3 <- c("fpg","a1c")
+Var.FPG <- c("fpg","a1c")
 ### BASE: Clinic + Hx CBC + CMP + Hx
 ### + Fasting
 ### + Urine + Var.Other.1+ Var.Other.2 vs  + SDOH
 ### Full
 
 
-
-
-```
-
-
-
-```{r}
-library(Gmisc)
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,show_all_values=TRUE,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.Clinic,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.Hx,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.CBC,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.CMP,Var.fasting,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.SDOH,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-
-
-df.small %>% mutate(Year.2015 = Year > 2013) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-Var.Urine,Var.Other.1,Var.Other.2,add_total_col = TRUE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-```
-
-
-```{r}
-
-df.small %>% mutate(Year.2015 = ifelse(Year > 2013,"2015-2016","2005-2014")) %>% 
-  getDescriptionStatsBy(by=Year.2015,
-#`Fasting Glucose Plasma&dagger;`=fpg,				
-VAR.MIN.2,add_total_col = FALSE,) %>% 
-  addHtmlTableStyle(pos.caption = "bottom") %>% 
-  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
-            tfoot = "&dagger; mg/dL")
-
-
+Var.NonFasting <- VAR.MIN.2[!(VAR.MIN.2 %in% Var.fasting)]
 
 ```
 
 
 
-```{r}
-# tune_grid.mod <<- expand.grid(
-#   nrounds = c(1500,2000),
-#   eta = c(0.01,0.05),
-#   max_depth = c(6,8),
-#   subsample = c(0.6,0.8),
-#   colsample_bytree = c(0.6,0.8),# bounded at maximum 1
-#   min_child_weight = c(1),
-#   gamma = c(0)
-# ) 
-# 
-# train_control <- trainControl(method = "cv", 
-#                               number = 5,
-#                               verboseIter = TRUE)
-# 
-# 
-# office_test$two <- label.test
-# #office_test$Pred.Full <- predict(xgb.model.full,dtest)
-# 
-# 
-# #office_train %>% select(all_of(Var.fasting))
-# office_train.Base <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
-# office_train.makeX <- makeX(office_train.Base)
-# dtrain <- xgb.DMatrix(data = makeX(office_train.Base), label = label.train)
-# 
-# 
-# office_test.Base <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP)))
-# 
-# office_test.makeX <-  makeX(office_test.Base)
-# 
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# 
-# #Use caret to tune
-# xgb_tuned.Base <- caret::train(
-#   method = "xgbTree",
-#   x= makeX(office_train.Base),
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# xgb.model.Base<- xgboost::xgb.train(params=xgb_tuned.Base$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Base <- predict(xgb.model.Base,dtest)
-# 
-# 
-# ### FASTING
-# office_train.Fasting <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
-# 
-# office_train.makeX <- makeX(office_train.Fasting)
-# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
-# 
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# 
-# office_test.Fasting <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting)))
-# 
-# 
-# office_test.makeX <-  makeX(office_test.Fasting)
-# 
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# 
-# 
-# xgb_tuned.Fasting <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.Fasting<- xgboost::xgb.train(params=xgb_tuned.Fasting$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Fasting <- predict(xgb.model.Fasting,dtest)
-# 
-# 
-# ### URINE
-# office_train.Urine <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
-# 
-# office_train.makeX <- makeX(office_train.Fasting)
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# 
-# office_test.Urine <- office_test %>%  select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.Urine,Var.Other.1,Var.Other.2)))
-# 
-# 
-# office_test.makeX <-  makeX(office_test.Urine)
-# 
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# 
-# xgb_tuned.Urine <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.Urine.Var<- xgboost::xgb.train(params=xgb_tuned.Urine$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Urine.Var <- predict(xgb.model.Urine.Var,dtest)
-# 
-# 
-# 
-# ### SDOH
-# office_train.SDOH <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH)))
-# office_train.makeX <- makeX(office_train.SDOH)
-# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
-# dtrain <- xgb.DMatrix(data = makeX(office_train.SDOH), label = label.train)
-# 
-# 
-# 
-# office_test.makeX <-  makeX(office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH))))
-# 
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# xgb_tuned.SDOH <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# xgb.model.SDOH<- xgboost::xgb.train(params=xgb_tuned.SDOH$bestTune %>% flatten(),dtrain,nrounds=2000)
-# 
-# xgb.model.SDOH$feature_names[!xgb.model.SDOH$feature_names %in% colnames(dtest)]
-# 
-# office_test$Pred.SDOH <- predict(xgb.model.SDOH,dtest)
-# 
-# 
-# 
-# 
-# ### VAR 2 --- this is now a mini version of Full based on the results from Full
-# 
-# office_train.Var2 <- office_train %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
-# 
-# office_train.makeX <- makeX(office_train.Var2)
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# office_test.Var2 <- office_test %>% select(all_of(c(Var.Clinic,Var.Hx,Var.CBC,Var.CMP,Var.fasting,Var.SDOH,Var.Other.3 )))
-# 
-# office_test.makeX <-  makeX(office_test.Var2)
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# xgb_tuned.Var2 <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.Var2<- xgboost::xgb.train(params=xgb_tuned.Var2$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.Var2 <- predict(xgb.model.Var2,dtest)
-# 
-# 
-# 
-# ### FIB-4
-# office_train.FIB4 <- office_train %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
-# 
-# office_train.makeX <- makeX(office_train.FIB4)
-# office_train.makeX <- office_train.makeX[,colnames(office_train.makeX)]
-# 
-# dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
-# 
-# 
-# office_test.FIB4 <- office_test %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>%  select(a1c,FIB4) 
-# 
-# 
-# 
-# office_test.makeX <-  makeX(office_test.FIB4)
-# 
-# office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-# 
-# #office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-# 
-# 
-# office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-# 
-# dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-# 
-# 
-# 
-# xgb_tuned.FIB4 <- caret::train(
-#   method = "xgbTree",
-#   x= office_train.makeX,
-#   y = label.train,
-#   tuneLength = 1,
-#   trControl = train_control,
-#   tuneGrid = tune_grid.mod,
-#   metric = "RMSE",
-#   weights = weight.sample.train.norm,
-#   verbose=TRUE
-# )
-# 
-# 
-# xgb.model.FIB4<- xgboost::xgb.train(params=xgb_tuned.FIB4$bestTune %>% flatten(),dtrain,nrounds=2000)
-# office_test$Pred.FIB4 <- predict(xgb.model.FIB4,dtest)
 
-### MIN MODEL
-## Can put which ever VAR.MIN.2 vs VAR.MIN.3
-VAR.MIN.3 = c('fpg','a1c')
-office_train.MIN <- office_train %>% select(all_of(c(VAR.MIN.3 )))
+```{r Loop for training and running models}
 
-office_train.makeX <- makeX(office_train.MIN)
-dtrain <- xgb.DMatrix(data = office_train.makeX, label = label.train)
+### THIS IS TAKEN FROM CHATGTP
 
-office_test.MIN <- office_test %>% select(all_of(c(VAR.MIN.3 )))
-
-office_test.makeX <-  makeX(office_test.MIN)
-office_test.makeX <- f.align_columns(office_train.makeX,office_test.makeX)
-
-#office_test.makeX <- f.add.makeX.columns(office_test.makeX)
-
-office_test.makeX<-office_test.makeX[,colnames(office_train.makeX)]
-
-dtest <- xgb.DMatrix(data =office_test.makeX, label = label.test)
-
-xgb_tuned.MIN <- caret::train(
-  method = "xgbTree",
-  x= office_train.makeX,
-  y = label.train,
-  tuneLength = 1,
-  trControl = train_control,
-  tuneGrid = tune_grid.mod,
-  metric = "RMSE",
-  weights = weight.sample.train.norm,
-  verbose=TRUE
+# Define your model configurations
+model_configs <- list(
+  FULL = list(
+    mutate_expr = ~ select(.,everything()),
+    pred_col = "Pred.Full2"
+  ),
+  FIB4 = list(
+    mutate_expr = ~ mutate(., FIB4 = ast / sqrt(alt) * Age / plt) %>% select(a1c, FIB4),
+    pred_col = "Pred.FIB4"
+  ),
+  FPG = list(
+    mutate_expr = ~ select(., all_of(Var.FPG)),
+    pred_col = "Pred.FPG"
+  ),
+  MIN = list(
+    mutate_expr = ~ select(., all_of(VAR.MIN.2)),
+    pred_col = "Pred.Min"
+  ),
+  NonFasting = list(
+   mutate_expr = ~ select(.,all_of(Var.NonFasting)),
+   pred_col = "Pred.NonFasting"
+  )
 )
 
+# Function to train and predict for each model
+run_xgb_model <- function(train_data, test_data, label_train, label_test, config) {
+  # Prepare training data
+  train_processed <- rlang::as_function(config$mutate_expr)(train_data)
+  train_X <- makeX(train_processed)
+  dtrain <- xgb.DMatrix(data = train_X, label = label_train)
 
-xgb.model.MIN<- xgboost::xgb.train(params=xgb_tuned.MIN$bestTune %>% flatten(),dtrain,nrounds=2000)
-office_test$Pred.MIN <- predict(xgb.model.MIN,dtest)
+  # Prepare testing data
+  test_processed <- rlang::as_function(config$mutate_expr)(test_data)
+  test_X <- makeX(test_processed)
+  test_X <- f.align_columns(train_X, test_X)
+  test_X <- test_X[, colnames(train_X)]
+  dtest <- xgb.DMatrix(data = test_X, label = label_test)
+
+  # Train model
+  xgb_tuned <- caret::train(
+    method = "xgbTree",
+    x = train_X,
+    y = label_train,
+    tuneLength = 1,
+    trControl = train_control,
+    tuneGrid = tune_grid.mod,
+    metric = "RMSE",
+    weights = weight.sample.train.norm,
+    verbose = TRUE
+  )
+
+  xgb_model <- xgboost::xgb.train(params = xgb_tuned$bestTune %>% flatten(), dtrain, nrounds = 2000)
+
+  # Make predictions
+  pred <- predict(xgb_model, dtest)
+
+  return(pred)
+}
+
+# Iterate over the model configurations
+for (model_name in names(model_configs)) {
+  config <- model_configs[[model_name]]
+  office_test[[config$pred_col]] <- run_xgb_model(office_train, office_test, label.train, label.test, config)
+}
+
+# Check predictions
+head(office_test)
+
+```
+
+```{r}
+
+office_test$Pred %>% ggplot() + geom_point(aes(x=Pred.Full,y=Pred.Full2)) + geom_abline(aes(slope=1,intercept=0))
+plot(office_test$Pred.Full,office_test$Pred.Full2)
+```
 
 
+```{r}
 ### END MODELS
 office_train$two <- label.train
 office_train$sample.ogtt.weight <-  weight.sample.train
@@ -1031,22 +698,27 @@ office_test$two <- label.test
 office_test$sample.ogtt.weight <-  weight.sample.test
 
 ### This is a Rda of the office_test data frame 
-file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2025.02.09.Rda'
+file.office.train <- '~/Documents/NHANES15-16/NHANES-office-train-layered_2025.02.25.Rda'
 save(office_train,file=file.office.train)
 
 ### This is a Rda of the office_test data frame 
 
-file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2024.02.09.Rda'
+file.office.test <- '~/Documents/NHANES15-16/NHANES-office-test-layered_2025.02.25.Rda'
 save(office_test,file=file.office.test)
 
 ### This is a list of all the models in question
 #list.models <- list(xgb.model.Base,xgb.model.Fasting,xgb.model.FIB4,xgb.model.full,xgb.model.SDOH,xgb.model.Urine.Var,xgb.model.Var2,xgb.model.MIN)
 list.models <- list(xgb.model.full,xgb.model.MIN)
-file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb_2025.02.09.models"
+file.list.models <- "~/Documents/NHANES15-16/NHANES-A1c-All-xgb_2025.02.25.models"
 save(list.models,file=file.list.models)
 
 #office_test$Pred.26 <- predict(xgb.model.26,dtest)
 ```
+
+
+
+
+
 ```{r}
 # 
 # office_train$two <- label.train
