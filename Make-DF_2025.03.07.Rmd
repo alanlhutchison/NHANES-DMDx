@@ -1,0 +1,161 @@
+---
+title: "Make-DF"
+author: "alanlhutchison"
+date: "2024-10-31"
+output: html_document
+---
+
+The point of this file is to make the DF file that is then run by the "NHANES-XGTBoost" Markdown file. It pulls NHANES data straight from the web, it does not reference downloaded XPT files.
+
+```{r setup, include=FALSE}
+
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+### Uncomment this if the first time, otherwise leave commented
+#install.packages('nhanesA')
+#install.packages('foreign')
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+```
+
+## Analysis of NHANES data
+
+### The goal of this analysis is to understand what featuers impact the ability of A1c to predict 2-hour oral glucose tolerance test outcomes
+
+
+
+```{r}
+#nhanes()
+letters <- c('D','E','F','G','H','I')
+years <- c(2005,2007,2009,2011,2013,2015)
+
+
+# Make sure you have a good internet connection for this 
+
+### These are the questionnaires/ datasets that are important from NHANES that are consistent across the years in question
+vars.no.adjust <- c('DEMO','CBC','ALQ','BPQ','DIQ','MCQ','BPX','GHB','DXXAG','BMX','SLQ','MGX','HEPA','HEPB_S','HEPC','HEPE','FASTQX')
+
+### These are the datasets that need modification from year to year - this distinction is important for the generate-output file but otherwise not meaningful
+vars.need.adjust <- c('OGTT','BIOPRO','GLU','INS','HEPBD','ALB_CR')
+
+cols <- c('BMIRECUM','MCQ240D','BPAEN1','MCQ240L','MCQ240B','DIQ175A','DMDHHSIZ','DMDFMSIZ','DMDHHSZA','DMDHHSZB','DMDHHSZE')
+
+
+no.var.let <- c('DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D','MGX_E','MGX_F','MGX_I','HEPE_D','HEPE_E','INS_D','INS_E','INS_F','INS_G')
+### 
+## NEED TO MAKE SURE FIRST ARGUMENT ACTUALLY EXISTS, OTHERWISE THIS ALL BREAKS
+#nhanes('DEMO_D')
+
+
+# Function to match column types
+match_column_types <- function(df1, df2) {
+  common_cols <- intersect(names(df1), names(df2))
+  
+  for (col in common_cols) {
+    if (class(df1[[col]]) != class(df2[[col]])) {
+      # If one is factor, convert to character
+      if (is.factor(df1[[col]])) df1[[col]] <- as.character(df1[[col]])
+      if (is.factor(df2[[col]])) df2[[col]] <- as.character(df2[[col]])
+      
+      # If one is numeric and the other is character, convert both to character
+      if ((is.numeric(df1[[col]]) & is.character(df2[[col]])) | 
+          (is.character(df1[[col]]) & is.numeric(df2[[col]]))) {
+        df1[[col]] <- as.character(df1[[col]])
+        df2[[col]] <- as.character(df2[[col]])
+      }
+    }
+  }
+  return(list(df1, df2))
+}
+
+
+
+
+
+vars <- c(vars.no.adjust,vars.need.adjust)
+for (i in 1:length(vars)){
+  j = 1
+  var <- vars[i]
+  var.let <- paste0(var,'_',letters[j])
+  while ( (var.let %in% no.var.let) & (j <= length(letters)) ){
+    j <- j+ 1
+    var.let <- paste0(var,'_',letters[j])
+  }
+
+  if(j<=length(letters)){
+    #print(var.let)
+    let.lab <- nhanes(var.let) %>% mutate(Year = years[j])
+
+
+
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){let.lab <- let.lab  %>%     mutate(LBDHD=factor(LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+
+
+    ### HEPBD adjustment
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){let.lab <- let.lab  %>%     mutate(LBDHD=factor(LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+
+    j <- j+1
+    }
+
+  ## In this loop for data we need to modify, we will be more selective
+  while (j<=length(letters)){
+    let <- letters[j]
+    var.let <- paste0(var,'_',let)
+    print(! var.let %in% no.var.let)
+    if(! var.let %in% no.var.let) {
+      #print(var.let)
+      lab <- nhanes(var.let) %>% mutate(Year = years[j])
+      if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){ lab <- lab  %>% mutate(LBDHD=factor(LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+      }
+      # Apply type matching
+      combo <- match_column_types(let.lab, lab)
+      let.lab <- combo[[1]]
+      lab <- combo[[2]]
+      
+      let.lab <- dplyr::bind_rows(let.lab,lab)
+    }
+
+    j=j+1
+  }
+      for (col in cols){
+        if(sum(col %in% names(let.lab) ) ==1){ let.lab[,col] <- as.numeric(let.lab[,col]) }
+      }
+        if(i==1){vars.lab <- let.lab} else{vars.lab <-dplyr::full_join(vars.lab,let.lab,join_by(SEQN,Year))}
+}
+
+vars.lab
+
+
+
+```
+
+```{r}
+## If new
+df.master <- vars.lab
+
+## If adding on
+#df.master<-full_join(df.master,vars.lab,join_by(SEQN))
+
+
+## If doing a stand-alone code
+#save(df.master,file='~/Documents/NHANES15-16/df.master-2025.02.09.Rda')
+#load('~/Documents/NHANES15-16/df.master-2024.08.18.Rda')
+```
