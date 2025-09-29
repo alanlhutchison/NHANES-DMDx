@@ -47,37 +47,16 @@ message("All required packages are successfully installed and loaded. ✅")
 
 
 ```{r}
-# load(paste0("~/Documents/NHANES/NHANES-office-pre-full_2025.07.14-BinaryProbs.Rda"))
-# load(paste0("~/Documents/NHANES/NHANES-office-train-full_2025.07.14-BinaryProbs.Rda"))
-# load(paste0("~/Documents/NHANES/NHANES-office-test-full_2025.07.14-BinaryProbs.Rda"))
-
-#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-pre-full_2025.07.14-BinaryProbs.Rda"))
-#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-train-full_2025.07.14-BinaryProbs.Rda"))
-#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-test-full_2025.07.14-BinaryProbs.Rda"))
 
 
 
-# load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.07.29-Binary.Rda")
-# load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.07.29-Binary.Rda")
-# load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.07.29-Binary.Rda")
-
-
-load("df_full_2025.09.24.Rda")
+load("files/df_full_2025.09.24.Rda")
 
 
 office_pre <- df_full %>% filter(Year < 2005)
 office_train <- df_full %>% filter(Year > 2003, Year < 2015)
 office_test <- df_full %>% filter(Year > 2013)
 office_ext <- office_pre %>% rename(sample.weight = sample.mec.weight) %>% select(-c(sample.fasting.weight,sample.ogtt.weight))
-
-#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.09.02-Binary.Rda") # office_ext
-#load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.09.02-Binary.Rda") # office_train
-#load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.09.02-Binary.Rda") # office_test
-
-
-#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.07.31-Binary-PreDM.Rda")
-#load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.07.31-Binary-PreDM.Rda")
-#load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.07.31-Binary-PreDM.Rda")
 
 
 ```
@@ -461,7 +440,7 @@ f.just.prepare.data.external <- function(clean.output,config){
 
 
 
-file.list.models <- "NHANES-All-xgb.models_all_2025.09.25-Binary.Rda"
+file.list.models <- "files/NHANES-All-xgb.models_all_2025.09.25-Binary.Rda"
 load(file.list.models) # loads xgb_models
 
 
@@ -553,7 +532,7 @@ office_ext$SEQN <- clean.output$SEQN.ext
 
 
 office_noogtt <- office_ext
-save(office_noogtt,file="NHANES-office-1999-2016-noOGTT-layered_all_2025.09.24-Binary.Rda")
+save(office_noogtt,file="files/NHANES-office-1999-2016-noOGTT-layered_all_2025.09.24-Binary.Rda")
 ```
 
 
@@ -642,7 +621,7 @@ df.mo3 <- df.mort3 #rbind(office_pre_final %>% select(-c(ucod_lead)),
 
 ### COMBINE COMBINE
 df.mo3 %>% mutate(NAN = !is.na(Pred.SOC.Fast)) %>% select(NAN,Year) %>% table()
-save(df.mo3,file="NHANES-df.mo3_noogtt.Rda")
+save(df.mo3,file="files/NHANES-df.mo3_noogtt.Rda")
 
 ```
 
@@ -1416,7 +1395,7 @@ print(round(results_table, 3))
 g1<-grid.arrange(plt.km.99.16.pred + labs(tag="A"),
              grid.arrange(ncol=2,plt.DMlead+ labs(tag="B"),plt.DMcontr+ labs(tag="C"))
 )
-ggsave(plot = g1,filename = "Surv-DM-cause.png",width=7,height=7,units="in")
+ggsave(plot = g1,filename = "figures/Surv-DM-cause.png",width=7,height=7,units="in")
 
 ```
 

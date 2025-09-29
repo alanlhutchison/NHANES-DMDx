@@ -17,7 +17,8 @@ packages <- c(
     "knitr",
     "foreign",
     "tidyverse",
-    "nhanesA"
+    "nhanesA",
+    "rworldmap"
 )
 
 
@@ -513,6 +514,6 @@ df_full <- df_full %>%
 
 
 ```{r}
-save(df_full,file='df_full_2025.09.24.Rda')
+save(df_full,file='files/df_full_2025.09.24.Rda')
 ```
 

@@ -168,7 +168,7 @@ renamed_labels <- c( 'fpg' = 'Fasting Plasma Glucose',
 ```{r Load files, name output files}
 
 
-dir.string <-""
+dir.string <-"files/"
 date.string <- "2025.09.25-Binary"
 filter.string <- "all"
 
@@ -389,7 +389,7 @@ shap.dat.full.2$Feature <- factor(shap.dat.full.2$Feature,levels=features.ordere
 
 plt.shap.lines.full <- shap.dat.full.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ylab("SHAP Values");plot(plt.shap.lines.full)
 
-ggsave(plot=plt.shap.lines.full,filename="Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.lines.full,filename="figures/Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
 
 
 
@@ -437,31 +437,31 @@ shap.dat.soc.2$Feature <- factor(shap.dat.soc.2$Feature,levels=features.ordered,
 
 plt.shap.lines.full <- shap.dat.full.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ggtitle("Full Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.full)
 
-ggsave(plot=plt.shap.lines.full,filename="Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.lines.full,filename="figures/Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
 
 plt.shap.summ.full <- xgb.ggplot.shap.summary(prepped$Full[[1]], contr.full, model = xgb_models$Full, top_n = 20) + 
   scale_x_discrete("Feature",labels=renamed_labels)+
   ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("Full Model")  + theme.1 +  
   scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.full)
 
-ggsave(plot=plt.shap.summ.full,filename="Shap-Summ-Full.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.summ.full,filename="figures/Shap-Summ-Full.bmp",width=7,height=7,units = c("in"))
 
 
 plt.shap.lines.soc <- shap.dat.soc.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") +  ggtitle("A1c+ Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.soc)
 
-ggsave(plot=plt.shap.lines.soc,filename="Shap-lines-Soc.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.lines.soc,filename="figures/Shap-lines-Soc.bmp",width=7,height=7,units = c("in"))
 
 plt.shap.summ.soc <- xgb.ggplot.shap.summary(prepped$SOC[[1]], contr.soc, model = xgb_models$SOC, top_n = 20) + 
   scale_x_discrete("Feature",labels=renamed_labels)+
   ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("A1c+ Model")  + theme.1 + 
   scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.soc)
 
-ggsave(plot=plt.shap.summ.soc,filename="Shap-Summ-Soc.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.summ.soc,filename="figures/Shap-Summ-Soc.bmp",width=7,height=7,units = c("in"))
 
 
 plt.shap.lines.soc.fast <- shap.dat.soc.fast.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ggtitle("A1c/FPG+ Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.soc.fast)
 
-ggsave(plot=plt.shap.lines.soc.fast,filename="Shap-lines-Soc.Fast.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.lines.soc.fast,filename="figures/Shap-lines-Soc.Fast.bmp",width=7,height=7,units = c("in"))
 
 
 plt.shap.summ.soc.fast <- xgb.ggplot.shap.summary(prepped$SOC.Fast[[1]], contr.soc.fast, model = xgb_models$SOC.Fast, top_n = 20) + 
@@ -469,8 +469,26 @@ plt.shap.summ.soc.fast <- xgb.ggplot.shap.summary(prepped$SOC.Fast[[1]], contr.s
   ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("A1c/FPG+ Model")  + theme.1 + 
   scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.soc.fast)
 
-ggsave(plot=plt.shap.summ.soc.fast,filename="Shap-Summ-Soc.Fast.bmp",width=7,height=7,units = c("in"))
+ggsave(plot=plt.shap.summ.soc.fast,filename="figures/Shap-Summ-Soc.Fast.bmp",width=7,height=7,units = c("in"))
 
+renamed_labels.2 <- renamed_labels
+renamed_labels.2["fpg"] <- "FPG"
+renamed_labels.2["a1c"] <- "A1c"
+renamed_labels.2["SBP"] <- "Systolic BP"
+renamed_labels.2["sbp"] <- "Systolic BP"
+renamed_labels.2["DBP"] <- "Diastolic BP"
+renamed_labels.2["dbp"] <- "Diastolic BP"
+renamed_labels.2["Waist.Circ"] <- "Waist"
+
+
+plt.shap.summ.soc.fast.10 <- xgb.ggplot.shap.summary(prepped$SOC.Fast[[1]], contr.soc.fast, model = xgb_models$SOC.Fast, top_n = 10) + 
+  scale_x_discrete("Feature",labels=renamed_labels.2)+
+  ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("Model")  + theme.1 + 
+  scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.soc.fast.10)
+
+ggsave(plot=plt.shap.summ.soc.fast.10 + theme(legend.position ="none",axis.text=element_text(size=8),
+            axis.title=element_text(size=8),
+            plot.title = element_text(hjust = 0.5,size=8)) ,filename="figures/Shap-Summ-Soc.Fast.10.bmp",width=1.8,height=1.8,units = c("in"))
 
 features.top20.soc.fast <-plt.shap.summ.soc.fast$data %>% group_by(feature) %>% reframe(val = abs(mean(shap_value))) %>% arrange(desc(val)) %>% pull(feature)
 
@@ -484,7 +502,7 @@ features.top20.soc.fast <-plt.shap.summ.soc.fast$data %>% group_by(feature) %>% 
 g<-grid.arrange(ncol=1,nrow=2,
              plt.shap.lines.full + labs(tag="A"),
               plt.shap.summ.full + labs(tag="B")); plot(g)
-ggsave(plot=g,filename="Shap.Full.AB.bmp",width = 7,height = 7, units = "in")
+ggsave(plot=g,filename="figures/Shap.Full.AB.bmp",width = 7,height = 7, units = "in")
 
 
 ```
@@ -563,7 +581,7 @@ df.small$two %>% sd()
 
 ```{r}
 
-load("NHANES-df.mo3_noogtt.Rda") # loads df.mo3
+load("files/NHANES-df.mo3_noogtt.Rda") # loads df.mo3
 
 features <- features.top20.soc.fast
 
@@ -843,7 +861,7 @@ plt.cohort.boxplots<-ggplot() +
   labs(color = "Subset") +
   scale_color_manual(values = colors) ;print(plt.cohort.boxplots)
 
-ggsave(plot=plt.cohort.boxplots,file='Cohort-Boxplots.bmp')
+ggsave(plot=plt.cohort.boxplots,file='figures/Cohort-Boxplots.bmp')
 ```
 
 
@@ -1036,7 +1054,7 @@ plt.cohort.6 <-ggplot() +
 
 plt.cohorts <- grid.arrange(ncol=2,nrow=3,plt.cohort.1,plt.cohort.2,plt.cohort.3,plt.cohort.4,plt.cohort.5, plt.cohort.6)
 
-plt.cohorts %>% ggsave(file="Cohort-6.bmp",height=10,width=7,units=c("in")); plot(plt.cohorts)
+plt.cohorts %>% ggsave(file="figures/Cohort-6.bmp",height=10,width=7,units=c("in")); plot(plt.cohorts)
 
 ```
 
@@ -1078,7 +1096,7 @@ plt.egfr.only <- ggplot() +
 
 
 
-plt.egfr.only %>% ggsave(file="A1c-2hG-eGFR-only.bmp",height=10,width=7,units=c("in"))
+plt.egfr.only %>% ggsave(file="figures/A1c-2hG-eGFR-only.bmp",height=10,width=7,units=c("in"))
 
 ```
 
@@ -1379,7 +1397,7 @@ theme.1 <- theme(axis.text=element_text(size=8),
 
 plt.calibration.quantile <- office_test %>% mutate(bin=cut_number(Pred.SOC.Fast, n = 10)) %>% group_by(bin) %>% reframe(med=median(Pred.SOC.Fast),freq=sum(DM==TRUE)/sum(!is.na(DM))) %>% ggplot() + geom_point(aes(x=med,y=freq)) + geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed") +  geom_rug(data=office_test,aes(x=Pred.SOC.Fast,y=as.integer(DM)),alpha=0.6) + xlab("Median of Probaility Quantile") + ylab("Frequency of Diabetes Diagnosis") + xlim(0,1) + ylim(0,1) + ggtitle("Frequency of Diagnosis by Quantile for SOC-Fasting Model") + theme.1; plot(plt.calibration.quantile)
 
-ggsave(plt.calibration.quantile,file="Quantile-calibration-Pred.SOC.Fasting.bmp")
+ggsave(plt.calibration.quantile,file="figures/Quantile-calibration-Pred.SOC.Fasting.bmp")
 
 
 
@@ -1461,7 +1479,7 @@ plt.calibration.cohorts <- grid.arrange(nrow=2,ncol=3,plt.calibration.cohort.age
              label.1 )
 
 
-ggsave(file='Calibration_cohorts.bmp',plot=plt.calibration.cohorts)
+ggsave(file='figures/Calibration_cohorts.bmp',plot=plt.calibration.cohorts)
 
 
 ```
@@ -2690,7 +2708,7 @@ grid.arrange(nrow=4,heights=c(4,1,4,1),
             arrangeGrob(ncol=2,
                          plt.2 + theme(legend.position="none") + theme.1 + labs(tag="C"),
                           plot.dca.eval.dm.few.fast + theme(legend.position="none")+ theme.1 + labs(tag="D")),
-             legend.2) %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-4.bmp")
+             legend.2) %>% suppressWarnings() %>% ggsave(file="figures/ROC-DCA-figure-4.bmp")
 
 
 
@@ -2712,7 +2730,7 @@ grid.arrange(nrow=3,heights=c(4,1,1.2),
                           plt.dca.dm + theme(legend.position="none")+ theme.1 + labs(tag="B")),
              legend.2,
              arrangeGrob(ncol=1,tg_combined 
-             ),top="Diagnosis of Diabetes") %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-AB.bmp")
+             ),top="Diagnosis of Diabetes") %>% suppressWarnings() %>% ggsave(file="figures/ROC-DCA-figure-AB.bmp")
 
 
 legend.2 <- cowplot::get_legend(plt.roc.results.few.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
@@ -2743,7 +2761,7 @@ grid.arrange(nrow=3,heights=c(5,1.5,3),
                           plt.dca.dm + theme(legend.position="none")+ theme.1 + labs(tag="B")),
              legend.2,
              arrangeGrob(ncol=1,tg_combined.full 
-             )) %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-AB-Few.bmp")
+             )) %>% suppressWarnings() %>% ggsave(file="figures/ROC-DCA-figure-AB-Few.bmp")
 
 
 ```

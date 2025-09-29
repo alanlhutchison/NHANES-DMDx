@@ -72,13 +72,13 @@ f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
 
 
 ```{r}
-dir.string <-""
+dir.string <-"files/"
 date.string <- "2025.09.25-Binary"
 filter.string <- "all"
 ```
 
 ```{r}
-load("df_full_2025.09.24.Rda")
+load("files/df_full_2025.09.24.Rda")
 df_full  %>% select(Year) %>% table()
 df_full <- df_full %>% select(-c(sample.fasting.weight,sample.mec.weight))
 
