@@ -1,0 +1,683 @@
+---
+title: "NHANES-XGBOOST"
+author: "alanlhutchison"
+date: "2025-09-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+```{r Libraries, include=FALSE,echo=FALSE}
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+
+
+
+packages <- c(
+    "dplyr",
+  "data.table",
+  "knitr",
+    "foreign",
+    "Hmisc",
+    "viridis",
+    "tidymodels",
+    "data.table",
+    "conflicted",
+    "naniar",
+    "caret",
+    "ggplot2",
+    "tidyverse",
+    "glmnet",
+    "xgboost",
+    "gridExtra"    
+)
+
+
+for (pkg in packages) {
+  # Check if the package is not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    # If not, install it from CRAN
+    install.packages(pkg)
+  }
+  # Load the package into the R session
+  library(pkg, character.only = TRUE)
+}
+
+
+
+conflict_prefer("rename","dplyr")
+conflict_prefer("mutate","dplyr")
+conflict_prefer("sum","base")
+conflict_prefer("filter","dplyr")
+
+conflict_prefer_all("xgboost")
+```
+
+
+
+```{r Making DF from DF.MASTER}
+
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+
+```
+
+
+```{r}
+dir.string <-""
+date.string <- "2025.09.25-Binary"
+filter.string <- "all"
+```
+
+```{r}
+load("df_full_2025.09.24.Rda")
+df_full  %>% select(Year) %>% table()
+df_full <- df_full %>% select(-c(sample.fasting.weight,sample.mec.weight))
+
+office_pre <- df_full %>% filter(Year < 2005)
+office_train <- df_full %>% filter(Year > 2003, Year < 2015)
+office_test <- df_full %>% filter(Year > 2013)
+```
+
+
+
+
+```{r Defining Column Functions}
+
+
+f.align_columns <- function(ma, mb) {
+  # Get the column names for MA and MB
+  ma_columns <- colnames(ma)
+  mb_columns <- colnames(mb)
+  
+  # Identify the columns in MA but not in MB
+  missing_columns <- setdiff(ma_columns, mb_columns)
+  
+  # Add missing columns to MB, filled with zeros
+  for (col in missing_columns) {
+    zero_col <- matrix(0, nrow = nrow(mb), ncol = 1)
+    colnames(zero_col) <- col
+    mb <- cbind(mb, zero_col)
+  }
+  
+  # Reorder columns in MB to match the order in MA
+  mb <- mb[, ma_columns, drop = FALSE]
+  
+  return(mb)
+}
+
+
+### IF your analysis testing set includes categorical results not found in the training set, you could change this 
+f.add.makeX.columns <- function(x){
+  #x <- cbind(x,`Marriage.StatusDon't know`=0)
+  x <- cbind(x,`EduLevelHigh School Grad/GED or equivalent`=0)
+  #x <- cbind(x,`EduLevelRefused`=0)
+  x <- cbind(x,`Marriage.StatusRefused`=0)
+  return(x)
+}
+
+
+```
+
+
+
+
+```{r  IMPORT 2}
+f.is.DM <- function(df.fx){
+  dm =ifelse( (is.na(df.fx$a1c) & is.na(df.fx$fpg) & is.na(df.fx$two)), NA, 
+              ifelse( !is.na(df.fx$a1c) & df.fx$a1c >= 6.5, TRUE, 
+                ifelse(!is.na(df.fx$fpg) & df.fx$fpg >= 126,TRUE,
+                  ifelse(!is.na(df.fx$two) & df.fx$two >= 200,TRUE,FALSE))))
+  return(dm)
+}  
+
+
+df.alt <- rbind(office_train,office_test)
+df.alt$DM <- f.is.DM(df.alt)
+
+
+```
+
+
+
+
+```{r FILTER ON SOMETHING}
+
+
+df.small <- df.alt %>% drop_na(a1c,two,sample.ogtt.weight,fpg)
+
+
+pre.features <- names(office_pre)
+names(office_pre)[!names(office_pre) %in% names(df.small)]
+names(df.small)[!names(df.small) %in% names(office_pre)]
+
+
+data_subsets <- list(
+all = list(
+  subset_expr = ~ select(., everything() ),
+  filter.string = "all"),  
+  
+Age.50 = list(
+  subset_expr = ~ filter(.,Age >= 50),
+  filter.string = "Age>=50"),
+
+Age.60 = list(
+  subset_expr = ~ filter(.,Age >= 60),
+  filter.string = "Age>=60"),
+
+FIB4 = list(
+  subset_expr = ~ mutate(.,FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4>2.67),
+  filter.string = "FIB4>2.67"),
+
+BMI.2530 = list(
+  subset_expr = ~ mutate(.,BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>=25 & BMI<30) %>% select(-BMI),
+  filter.string = "BMI.25-30"),
+
+BMI.30 = list(
+  subset_expr = ~ mutate(.,BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>=30) %>% select(-BMI),
+  filter.string = "BMI.30"),
+
+BMI.35 = list(
+  subset_expr = ~ mutate(.,BMI = Weight/(Height.Stand^2)*100*100) %>% filter(BMI>=35) %>% select(-BMI),
+  filter.string = "BMI.35"),
+
+SBP.130 = list(
+  subset_expr = ~  filter(.,SBP >= 130),
+  filter.string = "SBP>=130"),
+
+GGT.40 = list(
+  subset_expr = ~ filter(.,ggt > 40),
+  filter.string = "ggt>40"),
+
+WC.100110 = list(
+  subset_expr = ~ filter(.,(Waist.Circ >= 100 & Gender=="Male"  & Waist.Circ <110)| (Waist.Circ >= 90 & Waist.Circ<100 & Gender=="Female" )),  #cm
+  filter.string = "WC100-110"),
+
+WC.110 = list(
+  subset_expr = ~ filter(.,(Waist.Circ > 110 & Gender=="Male" )| (Waist.Circ > 105 & Gender=="Female" )),  #cm
+  filter.string = "WC>110"),
+
+eGFR.60 = list(
+  subset_expr = ~ mutate(.,eGFR = 142 *
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012))   %>% filter(eGFR < 60),
+  filter.string = "eGFR<60"),
+
+eGFR.30 = list(
+  subset_expr = ~ mutate(.,eGFR = 142 *
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012))   %>% filter(eGFR < 30),
+  filter.string = "eGFR<30"),
+
+Hg.13 = list(
+  subset_expr = ~ filter(.,(hg < 13 & Gender=="Male") | (hg < 11 & Gender=="Female")),
+  filter.string = "hg<13"),
+
+MinModel = list(
+  subset_expr = ~ f%>% select(.,fpg, Age, a1c, insulin, Height.Stand, tgy, SBP, Waist.Circ, choles, u.alb, cr, u.cr, DBP, Poverty.Ratio, Seg.Neut.perc, pulse, iron, Arm.Circ, plt, ggt,Year,sample.ogtt.weight,two),
+  filter.string = "MinModel")
+)
+
+
+
+data_subset <- data_subsets[[filter.string]]
+df.small <- rlang::as_function(data_subset$subset_expr)(df.small)
+
+
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_",filter.string,"_",date.string,".Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_",filter.string,"_",date.string,".Rda")
+file.list.models <- paste0(dir.string,"NHANES-All-xgb.models_",filter.string,"_",date.string,".Rda")
+file.list.prepped.data <- paste0(dir.string,"NHANES-All-prepped.data_",filter.string,"_",date.string,".Rda")
+file.office.ext <- paste0(dir.string,"NHANES-office-ext-layered_",filter.string,"_",date.string,".Rda")
+
+```
+
+
+```{r Prep XGBOOST: Assign labels }
+f.clean.data.for.xgboost <- function(df.small){
+  df.nas <-lapply(df.small,function(x) (sum(!is.na(x))))  %>% data.frame()  %>% t() %>% data.frame()
+  names(df.nas) <- 'Col1'
+  df.nas$rownames <- rownames(df.nas)
+  var.included <- df.nas %>% arrange(desc(Col1)) %>% mutate(Col2=Col1/dim(df.small)[1]) %>% filter(Col2 > 0.88) %>% pull(rownames)
+  
+  office_train <- df.small %>% select(c(SEQN,all_of(var.included))) %>% filter(Year < 2015) #training(office_split)
+  office_test <- df.small %>% select(c(SEQN,all_of(var.included))) %>% filter(Year >= 2015) # testing(office_split)
+  
+  SEQN.train = office_train$SEQN
+  SEQN.test = office_test$SEQN
+  year.train = office_train$Year
+  year.test = office_test$Year
+  label.train = office_train$DM
+  label.test = office_test$DM
+  weight.sample.train = office_train$sample.ogtt.weight
+  weight.sample.test = office_test$sample.ogtt.weight
+  train.two = office_train$two
+  test.two = office_test$two
+  
+  return(list(
+  SEQN.train = SEQN.train,
+  SEQN.test = SEQN.test,
+  year.train = year.train,
+  year.test = year.test,
+  label.train = label.train,
+  label.test = label.test,
+  train.two = train.two,
+  test.two = test.two,
+  weight.sample.train = weight.sample.train,
+  weight.sample.test = weight.sample.test,
+  office_train = office_train %>% select(-c(SEQN,sample.ogtt.weight,Year,two,DM)),
+  office_test = office_test %>% select(-c(SEQN,sample.ogtt.weight,Year,two,DM))
+ ))
+}
+
+```
+
+```{r Prep XGBOOST: External data }
+f.clean.data.for.xgboost.external <- function(df.ext){
+
+  office_ext <- df.ext
+  
+  SEQN.ext = office_ext$SEQN
+
+  year.ext = office_ext$Year
+
+  label.ext = office_ext$DM
+
+  weight.sample.ext = office_ext$sample.ogtt.weight
+
+  ext.two = office_ext$two
+
+  return(list(
+  SEQN.ext = SEQN.ext,
+  year.ext = year.ext,
+  label.ext = label.ext,
+  ext.two = ext.two,
+  weight.sample.ext = weight.sample.ext,
+  office_ext = office_ext %>% select(-c(SEQN,sample.ogtt.weight,Year,two,DM))
+ ))
+}
+
+f.just.prepare.data.external <- function(clean.output,config){
+  year.ext = clean.output$year.ext
+  #label_ext = clean.output$label.ext
+  weight.sample.ext = clean.output$weight.sample.ext
+  ext_data = clean.output$office_ext
+  
+  # Prepare training data
+  ext_processed <- rlang::as_function(config$mutate_expr)(ext_data)
+  ext_X <- makeX(ext_processed)
+  dext <- xgb.DMatrix(data = ext_X)
+
+  
+  weight.sample.ext.norm <- weight.sample.ext / sum(weight.sample.ext)
+  
+  return(list(ext_X,dext,NULL,NULL,weight.sample.ext.norm))
+}
+
+
+```
+
+
+
+
+```{r}
+f.just.prepare.data <- function(clean.output,config){
+  year.train = clean.output$year.train
+  year.test = clean.output$year.test
+  label_train = clean.output$label.train
+  label_test = clean.output$label.test
+  weight.sample.train = clean.output$weight.sample.train
+  weight.sample.test = clean.output$weight.sample.test
+  train_data = clean.output$office_train
+  test_data = clean.output$office_test
+  
+  # Prepare training data
+  train_processed <- rlang::as_function(config$mutate_expr)(train_data)
+  train_X <- makeX(train_processed)
+  dtrain <- xgb.DMatrix(data = train_X, label = label_train)
+
+  # Prepare testing data
+  test_processed <- rlang::as_function(config$mutate_expr)(test_data)
+  test_X <- makeX(test_processed)
+  test_X <- f.align_columns(train_X, test_X)
+  test_X <- test_X[, colnames(train_X)]
+  dtest <- xgb.DMatrix(data = test_X, label = label_test)
+  
+  weight.sample.train.norm <- weight.sample.train / sum(weight.sample.train)
+  return(list(train_X,dtrain,test_X,dtest,weight.sample.train.norm))
+}
+```
+
+
+
+```{r Functions for running models}
+### THIS IS TAKEN FROM CHATGTP
+
+f.run_xgb_model <- function(clean.output, config) {
+
+  year.train = clean.output$year.train
+  year.test = clean.output$year.test
+  label_train = clean.output$label.train %>% as.integer()
+  label_train = label_train 
+  label_test = clean.output$label.test %>% as.integer()
+  label_test = label_test
+  weight.sample.train = clean.output$weight.sample.train
+  weight.sample.test = clean.output$weight.sample.test
+  train_data = clean.output$office_train
+  test_data = clean.output$office_test
+
+  # Prepare training data
+  train_processed <- rlang::as_function(config$mutate_expr)(train_data)
+  train_X <- makeX(train_processed)
+  dtrain <- xgb.DMatrix(data = train_X, label = label_train)
+
+  # Prepare testing data
+  test_processed <- rlang::as_function(config$mutate_expr)(test_data)
+  test_X <- makeX(test_processed)
+  test_X <- f.align_columns(train_X, test_X)
+  test_X <- test_X[, colnames(train_X)]
+  dtest <- xgb.DMatrix(data = test_X, label = label_test)
+
+
+  tune_grid.mod <<- expand.grid(
+    nrounds = c(1500,2000),
+    eta = c(0.01,0.05),
+    max_depth = c(6,8),
+    subsample = c(0.6,0.8),
+    colsample_bytree = c(0.6,0.8),# bounded at maximum 1
+    min_child_weight = c(1),
+    gamma = c(0)
+  )
+
+  train_control <- trainControl(method = "cv",
+                                 number = 5,
+                                 verboseIter = FALSE,
+                                 classProbs = TRUE,
+                                 summaryFunction = twoClassSummary)
+
+  weight.sample.train.norm <- weight.sample.train / sum(weight.sample.train)
+
+  
+  # Ensure factor levels are valid R variable names
+  label_train_factor <- as.factor(label_train)
+  levels(label_train_factor) <- make.names(levels(label_train_factor))  
+  
+  # Train model using caret for hyperparameter tuning
+  xgb_tuned <- caret::train(
+    method = "xgbTree",
+    x = train_X,
+    y = label_train_factor, # Use the factor with valid levels
+    tuneLength = 1,
+    trControl = train_control,
+    tuneGrid = tune_grid.mod,
+    metric = "auc",
+    weights = weight.sample.train.norm,
+    verbose = FALSE
+  )
+
+  # Train the final model with early stopping using the best hyperparameters
+  xgb_model <- xgboost::xgb.train(
+    params = c(xgb_tuned$bestTune %>% flatten() %>% as.list(), objective = "binary:logistic"),
+    data = dtrain,
+    nrounds = 2000,
+    watchlist = list(train = dtrain, test = dtest),
+    early_stopping_rounds = 50,
+    verbose = 1
+  )
+
+  # Make predictions (will be probabilities by default)
+  pred.train <- predict(xgb_model, dtrain)
+  pred.test <- predict(xgb_model, dtest)
+
+  return(list(pred.test = pred.test, pred.train = pred.train , model = xgb_model))
+}
+```
+
+
+```{r Loop for training and running models}
+conflict_prefer("arrange","plyr")
+conflict_prefer("desc","plyr")
+
+# Store models
+xgb_models <- list()
+prepped <- list()
+### Need to generate initial full dataset to pull the most important variables
+
+model_configs.1 <- list(
+  Full = list(
+    mutate_expr = ~ select(.,everything()),
+    pred_col = "Pred.Full"
+  ))
+
+### Define config
+config <- model_configs.1[["Full"]]
+
+
+### Clean data - this only needs to be done once
+clean.output <- f.clean.data.for.xgboost(df.small)
+office_train <- clean.output$office_train
+office_test <- clean.output$office_test
+
+### Prep
+prep <- f.just.prepare.data(clean.output,config)
+prepped[[names(model_configs.1)[[1]]]] <- prep
+### Run Model generation
+
+result <- f.run_xgb_model(clean.output, config)
+
+### Assign predictions
+office_test[[config$pred_col]] <- result$pred.test
+office_train[[config$pred_col]] <- result$pred.train
+
+### Store Model
+xgb_models[[names(model_configs.1)[1]]] <- result$model
+
+### Now can define subsets based on full model
+Var.FPG <- c("fpg","a1c")
+Var.fasting = c("iron",'fpg','tgy','insulin','Fasting.Time')
+Var.Urine = c("u.alb", "u.cr")
+
+Var.Min.2 <- xgb.importance(feature_names = colnames(xgb_models[["Full"]]),model=xgb_models[["Full"]]) %>% head(20) %>% select(Feature) %>% pull(Feature)
+Var.NonFasting <- Var.Min.2[!(Var.Min.2 %in% Var.fasting)]
+Var.NonFasting <- Var.NonFasting[!Var.NonFasting %in% Var.Urine]
+
+
+### Var.SOC.2
+Var.SOC.2 <- c("Age", "Gender", "Race", "TransfusionEver", "Told.Asthma", 
+"Anemia.Treatment", "a1c",  "Citizenship", "MCHC", 
+"mcv", "Mean.Cell.Hemoglobin", "rbc", "hg", "wbc", "RBC.Dist.Width", 
+"plt", "mpv", "Seg.Neut.perc", "LBXLYPCT", "Monocyte.perc", "eosin.perc", 
+"Baso.Perc", "Weight", "Height.Stand", "na", "bun", "cr", "alb", 
+"chlor", "alp", "potas", "tprot", "tbili", "bicarb", "cal", "alt", 
+"ast", "Arm.Circ", "Waist.Circ", "reg.iregg", "pulse", "sbp", 
+"dbp", "Ppl.In.Household", "PovertyRatio", "BP.Ever.Told.High", 
+"MCQ080"
+)
+
+Var.SOC.Fast.2 <- c("Age", "Gender", "Race", "TransfusionEver", "Told.Asthma", 
+"Anemia.Treatment", "fpg", "a1c",  "Citizenship", "MCHC", 
+"mcv", "Mean.Cell.Hemoglobin", "rbc", "hg", "wbc", "RBC.Dist.Width", 
+"plt", "mpv", "Seg.Neut.perc", "LBXLYPCT", "Monocyte.perc", "eosin.perc", 
+"Baso.Perc", "Weight", "Height.Stand", "na", "bun", "cr", "alb", 
+"chlor", "alp", "potas", "tprot", "tbili", "bicarb", "cal", "alt", 
+"ast", "Arm.Circ", "Waist.Circ", "reg.iregg", "pulse", "sbp", 
+"dbp", "Ppl.In.Household", "PovertyRatio", "BP.Ever.Told.High", 
+"MCQ080"
+)
+pre.features <- pre.features[!pre.features %in% c("two","SEQN","Year","sample.ogtt.weight")]
+pre.features.not.fpg <- pre.features[pre.features!="fpg"]
+"fpg" %in% pre.features
+
+# Define your additional model configurations
+model_configs <- list(
+  FIB4 = list(
+    mutate_expr = ~ mutate(., FIB4 = ast / sqrt(alt) * Age / plt) %>% select(a1c, FIB4),
+    pred_col = "Pred.FIB4"
+  ),
+  FPG = list(
+    mutate_expr = ~ select(., all_of(Var.FPG)),
+    pred_col = "Pred.FPG"
+  ),
+  MIN = list(
+    mutate_expr = ~ select(., all_of(Var.Min.2)),
+    pred_col = "Pred.Min"
+  ),
+  NonFasting = list(
+   mutate_expr = ~ select(.,all_of(Var.NonFasting)),
+   pred_col = "Pred.NonFasting"
+  ),
+  SOC = list(
+    mutate_expr = ~ select(.,all_of(pre.features.not.fpg)),
+   pred_col = "Pred.SOC"
+  ),
+  SOC.Fast = list(
+    mutate_expr = ~ select(.,all_of(pre.features)),
+   pred_col = "Pred.SOC.Fast"
+  )
+)
+
+
+
+# Iterate over the model configurations
+for (model_name in names(model_configs)) {
+  config <- model_configs[[model_name]]
+  prep <- f.just.prepare.data(clean.output, config)
+  result <- f.run_xgb_model(clean.output, config)
+  office_test[[config$pred_col]] <- result$pred.test
+  office_train[[config$pred_col]] <- result$pred.train
+  
+  prepped[[model_name]] <- prep
+  xgb_models[[model_name]] <- result$model
+}
+
+
+### MODELS COMPLETE, PREDICTIONS ADDED, RESTORE VARAIBLES, SAVE RDAs
+office_train$DM <- clean.output$label.train
+office_train$sample.ogtt.weight <-  clean.output$weight.sample.train
+office_train$Year <- clean.output$year.train
+office_train$two <- clean.output$train.two
+office_train$SEQN <- clean.output$SEQN.train
+
+
+office_test$DM <- clean.output$label.test
+office_test$sample.ogtt.weight <-  clean.output$weight.sample.test
+office_test$Year <- clean.output$year.test
+office_test$two <- clean.output$test.two
+office_test$SEQN <- clean.output$SEQN.test
+  
+
+
+### This is a Rda of the office_test data frame 
+save(office_train,file=file.office.train)
+
+### This is a Rda of the office_test data frame 
+save(office_test,file=file.office.test)
+
+### This is a Rda of the models
+save(xgb_models,file=file.list.models)
+
+save(prepped,file=file.list.prepped.data)
+
+```
+
+
+
+
+
+```{r}
+
+#load("~/Documents/NHANES-DMDx/NHANES-office-pre_2025.07.29-BinaryProbs.Rda")
+office_pre$DM <- f.is.DM(office_pre)
+
+pre.features <- names(office_pre)
+pre.features <- pre.features[!pre.features %in% c("two","SEQN","Year","sample.ogtt.weight","DM")]
+pre.features.not.fpg <- pre.features[pre.features!="fpg"]
+"fpg" %in% pre.features
+
+
+model_configs <- list(
+  FIB4 = list(
+    mutate_expr = ~ mutate(., FIB4 = ast / sqrt(alt) * Age / plt) %>% select(a1c, FIB4),
+    pred_col = "Pred.FIB4"
+  ),
+  FPG = list(
+    mutate_expr = ~ select(., all_of(Var.FPG)),
+    pred_col = "Pred.FPG"
+  ),
+  MIN = list(
+    mutate_expr = ~ select(., all_of(Var.Min.2)),
+    pred_col = "Pred.Min"
+  ),
+  NonFasting = list(
+   mutate_expr = ~ select(.,all_of(Var.NonFasting)),
+   pred_col = "Pred.NonFasting"
+  ),
+  SOC = list(
+    mutate_expr = ~ select(.,all_of(pre.features.not.fpg)),
+   pred_col = "Pred.SOC"
+  ),
+  SOC.Fast = list(
+    mutate_expr = ~ select(.,all_of(pre.features)),
+   pred_col = "Pred.SOC.Fast"
+  )
+)
+
+office_pre$DM <- f.is.DM(office_pre)
+
+
+### office_pre corrections
+
+
+load(file.list.models) # loads xgb_models
+
+
+### Clean data - this only needs to be done once
+clean.output <- f.clean.data.for.xgboost.external(office_pre )
+office_ext <- clean.output$office_ext
+
+
+
+
+
+model_name = "SOC.Fast"
+config <- model_configs[[model_name]]
+
+c1 <-colnames(prep[[2]])
+c2 <- xgb_models[[model_name]]$feature_names
+c1[!c1 %in% c2]
+c2[!c2 %in% c1]
+
+prep <- f.just.prepare.data.external(clean.output, config)
+
+pred.ext <- predict(xgb_models[[model_name]], prep[[2]])
+office_ext[[config$pred_col]] <- pred.ext
+
+
+office_ext$DM <- clean.output$label.ext
+office_ext$sample.ogtt.weight <-  clean.output$weight.sample.ext
+office_ext$Year <- clean.output$year.ext
+office_ext$two <- clean.output$ext.two
+office_ext$SEQN <- clean.output$SEQN.ext
+
+
+save(office_ext,file=file.office.ext)
+
+
+```
+
+
+
+
+

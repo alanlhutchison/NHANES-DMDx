@@ -1,0 +1,1586 @@
+---
+title: "Mortality"
+output: html_document
+date: "2025-07-16"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+packages <- c(
+  "readr",
+  "dplyr",
+  "purrr",
+  "stringr",
+  "survival",
+  "survminer",
+  "Publish",
+  "survey",
+  "DataExplorer",
+  "forcats",
+  "ggplot2",
+  "broom",
+  "gtsummary",
+  "broom.helpers",
+  "patchwork",
+  "tidyverse",
+  "nhanesA",
+  "glmnet",
+  "xgboost",
+  "gridExtra"
+)
+
+
+for (pkg in packages) {
+  # Check if the package is not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    # If not, install it from CRAN
+    install.packages(pkg)
+  }
+  # Load the package into the R session
+  library(pkg, character.only = TRUE)
+}
+
+message("All required packages are successfully installed and loaded. ✅")
+
+```
+
+
+```{r}
+# load(paste0("~/Documents/NHANES/NHANES-office-pre-full_2025.07.14-BinaryProbs.Rda"))
+# load(paste0("~/Documents/NHANES/NHANES-office-train-full_2025.07.14-BinaryProbs.Rda"))
+# load(paste0("~/Documents/NHANES/NHANES-office-test-full_2025.07.14-BinaryProbs.Rda"))
+
+#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-pre-full_2025.07.14-BinaryProbs.Rda"))
+#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-train-full_2025.07.14-BinaryProbs.Rda"))
+#load(paste0("~/Documents/NHANES-DMDx/NHANES-office-test-full_2025.07.14-BinaryProbs.Rda"))
+
+
+
+# load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.07.29-Binary.Rda")
+# load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.07.29-Binary.Rda")
+# load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.07.29-Binary.Rda")
+
+
+load("df_full_2025.09.24.Rda")
+
+
+office_pre <- df_full %>% filter(Year < 2005)
+office_train <- df_full %>% filter(Year > 2003, Year < 2015)
+office_test <- df_full %>% filter(Year > 2013)
+office_ext <- office_pre %>% rename(sample.weight = sample.mec.weight) %>% select(-c(sample.fasting.weight,sample.ogtt.weight))
+
+#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.09.02-Binary.Rda") # office_ext
+#load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.09.02-Binary.Rda") # office_train
+#load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.09.02-Binary.Rda") # office_test
+
+
+#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.07.31-Binary-PreDM.Rda")
+#load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.07.31-Binary-PreDM.Rda")
+#load("~/Documents/NHANES15-16/NHANES-office-test-layered_all_2025.07.31-Binary-PreDM.Rda")
+
+
+```
+
+
+```{r}
+
+mort_files <- list.files(
+  path       = "~/Documents/MORTALITY-DATA/1999-2004/",
+  pattern    = "\\.dat$",        
+  full.names = TRUE
+)
+
+mort_fwf <- fwf_cols(
+  SEQN       = c(1, 14),
+  eligstat   = c(15, 15),
+  mortstat   = c(16, 16),
+  ucod_lead  = c(17, 19),
+  diabetes   = c(20, 20),
+  hyperten   = c(21, 21),
+  permth_int = c(43, 45),
+  permth_exm = c(46, 48)
+)
+mort_types <- cols(
+  SEQN       = col_character(),
+  ucod_lead  = col_character(),
+  .default   = col_integer()
+)
+
+mortality_df <- mort_files %>% 
+  map_dfr(~ read_fwf(
+      file         = .x,
+      col_positions= mort_fwf,
+      col_types    = mort_types,
+      na           = c("", ".")
+    )) %>%
+  select(SEQN, mortstat, permth_exm,ucod_lead,diabetes) %>%
+  mutate(
+    SEQN = sprintf("%05d", as.integer(str_trim(SEQN)))
+  ) %>%
+  distinct()
+
+```
+
+
+```{r Mortality Data 1999-2004}
+################
+#NHANES VERSION#
+################
+
+files.mort <- c("~/Documents/MORTALITY-DATA/1999-2004/NHANES_1999_2000_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2001_2002_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2003_2004_MORT_2019_PUBLIC.dat")
+
+years <- c(1999,2001,2003)
+mort.table.1999 <- data.frame()
+for (i in c(1:length(files.mort))){
+  file <- files.mort[i]
+  year <- years[i]
+srvyin <- file  # full .DAT name here
+#srvyout <- "NHANES_2015" # shorthand dataset name here
+
+# Example syntax:
+#srvyin <- paste("NHANES_1999_2000_MORT_2019_PUBLIC.dat")   
+#srvyout <- "NHANES_1999_2000"      
+# read in the fixed-width format ASCII file
+dsn <- read_fwf(file=srvyin,
+                col_types = "iiiiiiii",
+                fwf_cols(seqn = c(1,6),
+                         eligstat = c(15,15),
+                         mortstat = c(16,16),
+                         ucod_leading = c(17,19),
+                         diabetes = c(20,20),
+                         hyperten = c(21,21),
+                         permth_int = c(43,45),
+                         permth_exm = c(46,48)
+                ),
+                na = c("", ".")
+)
+dsn$Year <- as.integer(year)
+print(year)
+if (nrow(mort.table.1999)==0){
+  mort.table.1999 <- dsn
+} else{
+  mort.table.1999 <- mort.table.1999 %>% rbind(dsn)
+}
+
+}
+```
+
+
+
+```{r Mortality Data 1999-2016}
+################
+#NHANES VERSION#
+################
+
+files.mort <- c("~/Documents/MORTALITY-DATA/1999-2004/NHANES_1999_2000_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2001_2002_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2003_2004_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2005_2006_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2013_2014_MORT_2019_PUBLIC.dat",
+                "~/Documents/MORTALITY-DATA/NHANES_2015_2016_MORT_2019_PUBLIC.dat")
+
+years <- c(1999,2001,2003,2005,2007,2009,2011,2013,2015)
+mort.table <- data.frame()
+for (i in c(1:length(files.mort))){
+  file <- files.mort[i]
+  year <- years[i]
+srvyin <- file  # full .DAT name here
+#srvyout <- "NHANES_2015" # shorthand dataset name here
+
+# Example syntax:
+#srvyin <- paste("NHANES_1999_2000_MORT_2019_PUBLIC.dat")   
+#srvyout <- "NHANES_1999_2000"      
+# read in the fixed-width format ASCII file
+dsn <- read_fwf(file=srvyin,
+                col_types = "iiiiiiii",
+                fwf_cols(seqn = c(1,6),
+                         eligstat = c(15,15),
+                         mortstat = c(16,16),
+                         ucod_leading = c(17,19),
+                         diabetes = c(20,20),
+                         hyperten = c(21,21),
+                         permth_int = c(43,45),
+                         permth_exm = c(46,48)
+                ),
+                na = c("", ".")
+)
+dsn$Year <- as.integer(year)
+print(year)
+if (nrow(mort.table)==0){
+  mort.table <- dsn
+} else{
+  mort.table <- mort.table %>% rbind(dsn)
+}
+
+}
+# NOTE:   SEQN is the unique ID for NHANES.
+
+# Structure and contents of data
+str(mort.table)
+mort.table
+dsn <- mort.table
+```
+
+```{r}
+dsn %>% filter(eligstat==1) %>% ggplot() + geom_histogram(aes(x=permth_exm,fill=as.factor(mortstat)),position="identity",alpha=0.7)
+```
+
+
+
+```{r}
+# Variable frequencies
+
+#ELIGSTAT: Eligibility Status for Mortality Follow-up
+table(dsn$eligstat)
+#1 = "Eligible"
+#2 = "Under age 18, not available for public release"
+#3 = "Ineligible"
+```
+
+
+```{r}
+#MORTSTAT: Final Mortality Status
+table(dsn$mortstat, useNA="ifany")
+# 0 = Assumed alive
+# 1 = Assumed deceased
+# <NA> = Ineligible or under age 18
+```
+
+
+```{r}
+#UCOD_LEADING: Underlying Cause of Death: Recode
+table(dsn$ucod_leading, useNA="ifany")
+# 1 = Diseases of heart (I00-I09, I11, I13, I20-I51)
+# 2 = Malignant neoplasms (C00-C97)
+# 3 = Chronic lower respiratory diseases (J40-J47)
+# 4 = Accidents (unintentional injuries) (V01-X59, Y85-Y86)
+# 5 = Cerebrovascular diseases (I60-I69)
+# 6 = Alzheimer's disease (G30)
+# 7 = Diabetes mellitus (E10-E14)
+# 8 = Influenza and pneumonia (J09-J18)
+# 9 = Nephritis, nephrotic syndrome and nephrosis (N00-N07, N17-N19, N25-N27)
+# 10 = All other causes (residual)
+# <NA> = Ineligible, under age 18, assumed alive, or no cause of death data available
+```
+
+
+```{r}
+#DIABETES: Diabetes Flag from Multiple Cause of Death (MCOD)
+table(dsn$diabetes, useNA="ifany")
+# 0 = No - Condition not listed as a multiple cause of death
+# 1 = Yes - Condition listed as a multiple cause of death
+# <NA> = Assumed alive, under age 18, ineligible for mortality follow-up, or MCOD not available
+```
+
+
+```{r}
+#HYPERTEN: Hypertension Flag from Multiple Cause of Death (MCOD)
+table(dsn$hyperten, useNA="ifany")
+# 0 = No - Condition not listed as a multiple cause of death
+# 1 = Yes - Condition listed as a multiple cause of death
+# <NA> = Assumed alive, under age 18, ineligible for mortality follow-up, or MCOD not available
+```
+
+
+```{r}
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+```
+
+
+```{r}
+mortality_clean.2005 <- mort.table %>%
+  mutate(SEQN = sprintf("%05d", as.integer(str_trim(seqn)))) %>%
+  select(SEQN, mortstat, permth_exm,ucod_leading,diabetes,Year)
+
+# mortality_clean.1999 <- mortality_df %>%
+#   mutate(SEQN = sprintf("%05d", as.integer(str_trim(SEQN)))) %>%
+#   select(SEQN, mortstat, permth_exm,ucod_lead,diabetes,Year)
+
+
+mortality_clean <- mort.table #rbind(mortality_clean.1999 %>% rename(ucod_leading = ucod_lead),
+                         #mortality_clean.2005)
+
+
+# office_pre_final <- office_ext %>%
+#   mutate(SEQN = sprintf("%05d", as.integer(str_trim(as.character(SEQN))))) %>%
+#   left_join(mortality_clean.1999, by = "SEQN")
+```
+
+
+```{r}
+#load('df.master-2025.02.09.Rda')
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+```
+
+
+```{r}
+# df.mort2 <- df_full %>% 
+#   mutate(
+#   ### Cr adjustment  
+#   #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+#   LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR)) %>% 
+#   rename(sbp1 = BPXSY1, dbp1 = BPXDI1, sbp2 = BPXSY2, dbp2 = BPXDI2,  sbp3=BPXSY3,dbp3=BPXDI3) %>% # Pulse, regular / irregular, SBP1, DBP1, SBP2,DBP2
+#   
+#   ### COMBINE BLOOD PRESSURE
+#   mutate(SBP = ( f.na.to.0(sbp1)+f.na.to.0(sbp2)+f.na.to.0(sbp3)) / (f.na.or.low(sbp1) + f.na.or.low(sbp2) + f.na.or.low(sbp3) ) )    %>% 
+#   mutate(DBP = ( f.na.to.0(dbp1)+f.na.to.0(dbp2)+f.na.to.0(dbp3)) / ( f.na.or.low(dbp1) + f.na.or.low(dbp2) + f.na.or.low(dbp3) ) )  %>% 
+#   select(-sbp1,-sbp2,-dbp1,-dbp2,-sbp3,-dbp3) %>% 
+#   ## Vital Signs
+#   #pulse = BPXPLS, reg.iregg = BPXPULS, 
+#   rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
+#               ## CBC
+#               wbc = LBXWBCSI, rbc = LBXRBCSI, hg = LBXHGB, mcv = LBXMCVSI, plt = LBXPLTSI, mpv = LBXMPSI, # WBC, RBC, Hg, MCV, PLT, MPV
+#               ## CMP
+#               alt = LBXSATSI, alb = LBXSAL, alp = LBXSAPSI, ast = LBXSASSI, # ALT, albumin, ALP, AST
+#               ## CMP
+#               bicarb = LBXSC3SI, bun = LBXSBU, chlor = LBXSCLSI, # Bicarb,  BUN, Chlor
+#               ## CMP
+#               cr = LBXSCR, # Creat
+#               ## CMP
+#               potas = LBXSKSI, #K
+#               ## CMP
+#               na = LBXSNASI, tbili = LBXSTB, cal = LBXSCA, tprot = LBXSTP, # Na, TBili, Cal, TProt
+#               fpg = LBXGLU, #fpg
+#         
+#               ## Vital Signs
+#               pulse = BPXPLS, reg.iregg = BPXPULS, 
+#               ## Weight Survey
+#              
+#               a1c = LBXGH, #glycohemoglobin
+#               sample.ogtt.weight = WTSOG2YR, two = LBXGLT,  # subsample weight, two hour glucose (mg/dL),
+#               dm.told = DIQ010, 
+#               Weight = BMXWT,
+#               Height.Stand = BMXHT,
+#               Arm.Circ = BMXARMC,
+#               Waist.Circ = BMXWAIST) %>% 
+# 
+#   rename(
+#     Seg.Neut.perc=LBXNEPCT,
+#     eosin.perc=LBXEOPCT, 
+#     Monocyte.perc=LBXMOPCT,
+#      Lymph.Perc=LBXLYPCT,
+#     
+#     RBC.Dist.Width=LBXRDW,
+#     Anemia.Treatment=MCQ053,
+#     Mean.Cell.Hemoglobin =LBXMCHSI) %>% 
+#   
+#   rename(
+#     TransfusionEver=MCQ092,
+#     MCHC=LBXMC,
+#     Ever.Told.Overweight=MCQ080,    
+#     Told.Asthma = MCQ010,
+#     Baso.Perc=LBXBAPCT,
+#     BP.Ever.Told.High = BPQ020) %>% 
+#   
+#   rename(
+#     Poverty.Ratio=INDFMPIR,
+#     RaceEth=RIDRETH1,
+#     Num.People.Household=DMDHHSIZ,
+#     CitizenStatus=DMDCITZN) %>% #
+#     #EducationStatus=DMDEDUC2) %>% 
+#   mutate(sample.fasting.weight = ifelse(!is.na(WTSAF2YR.x),WTSAF2YR.x,WTSAF2YR.y))
+
+df.mort2 <- df_full
+```
+
+
+```{r}
+df.mort.noogtt <- full_join(df.mort2 %>% mutate(SEQN=as.character(SEQN)),
+                            mortality_clean %>%
+                              mutate(SEQN=as.character(seqn)),by=join_by(SEQN==SEQN,Year==Year)) %>%
+  filter(is.na(two))
+
+df.mort.noogtt <- df.mort.noogtt %>% mutate(sample.weight=sample.mec.weight) %>% select(-c(sample.fasting.weight,sample.mec.weight,sample.ogtt.weight))
+
+```
+
+
+```{r}
+
+f.is.DM <- function(df.fx){
+  dm =ifelse( (is.na(df.fx$a1c) & is.na(df.fx$fpg) & is.na(df.fx$two)), NA, 
+              ifelse( !is.na(df.fx$a1c) & df.fx$a1c >= 6.5, TRUE, 
+                ifelse(!is.na(df.fx$fpg) & df.fx$fpg >= 126,TRUE,
+                  ifelse(!is.na(df.fx$two) & df.fx$two >= 200,TRUE,FALSE))))
+  return(dm)
+}  
+
+f.clean.data.for.xgboost.external <- function(df.ext){
+
+  office_ext <- df.ext
+  
+  SEQN.ext = office_ext$SEQN
+
+  year.ext = office_ext$Year
+
+  label.ext = office_ext$DM
+
+  weight.sample.ext = office_ext$sample.weight
+
+  ext.two = office_ext$two
+
+  return(list(
+  SEQN.ext = SEQN.ext,
+  year.ext = year.ext,
+  label.ext = label.ext,
+  ext.two = ext.two,
+  weight.sample.ext = weight.sample.ext,
+  office_ext = office_ext %>% select(-c(SEQN,sample.weight,Year,two,DM))
+ ))
+}
+
+f.just.prepare.data.external <- function(clean.output,config){
+  year.ext = clean.output$year.ext
+  #label_ext = clean.output$label.ext
+  weight.sample.ext = clean.output$weight.sample.ext
+  ext_data = clean.output$office_ext
+  
+  # Prepare training data
+  ext_processed <- rlang::as_function(config$mutate_expr)(ext_data)
+  ext_X <- makeX(ext_processed)
+  dext <- xgb.DMatrix(data = ext_X)
+
+  
+  weight.sample.ext.norm <- weight.sample.ext / sum(weight.sample.ext)
+  
+  return(list(ext_X,dext,NULL,NULL,weight.sample.ext.norm))
+}
+
+
+
+file.list.models <- "NHANES-All-xgb.models_all_2025.09.25-Binary.Rda"
+load(file.list.models) # loads xgb_models
+
+
+#load("~/Documents/NHANES15-16/NHANES-office-train-layered_all_2025.09.02-Binary.Rda") # office_train
+#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.09.02-Binary.Rda") # office_train
+
+#load("~/Documents/NHANES15-16/NHANES-All-prepped.data_all_2025.09.02-Binary.Rda")
+
+```
+
+
+```{r}
+names(df.mort.noogtt)[!names(df.mort.noogtt) %in% names(office_ext)]
+names(office_ext)[!names(office_ext) %in% names(df.mort.noogtt)]
+#pre.features[!pre.features %in% names(df.mort.noogtt)]
+
+#load("~/Documents/NHANES15-16/NHANES-office-ext-layered_all_2025.09.02-Binary.Rda") # office_train
+
+pre.features <- names(office_ext)
+
+match.features <- pre.features
+
+office_ready <- df.mort.noogtt[,names(df.mort.noogtt)[names(df.mort.noogtt) %in% match.features]]
+office_ready$two <- NA
+office_ready$DM <- f.is.DM(office_ready)
+
+
+pre.features <- pre.features[!pre.features %in% c("two","SEQN","Year","sample.weight","DM","Pred.SOC.Fast")]
+pre.features.not.fpg <- pre.features[pre.features!="fpg"]
+
+
+# Define your additional model configurations
+model_configs <- list(
+  FIB4 = list(
+    mutate_expr = ~ mutate(., FIB4 = ast / sqrt(alt) * Age / plt) %>% select(a1c, FIB4),
+    pred_col = "Pred.FIB4"
+  ),
+  FPG = list(
+    mutate_expr = ~ select(., all_of(Var.FPG)),
+    pred_col = "Pred.FPG"
+  ),
+  MIN = list(
+    mutate_expr = ~ select(., all_of(Var.Min.2)),
+    pred_col = "Pred.Min"
+  ),
+  NonFasting = list(
+   mutate_expr = ~ select(.,all_of(Var.NonFasting)),
+   pred_col = "Pred.NonFasting"
+  ),
+  SOC = list(
+    mutate_expr = ~ select(.,all_of(pre.features.not.fpg)),
+   pred_col = "Pred.SOC"
+  ),
+  SOC.Fast = list(
+    mutate_expr = ~ select(.,all_of(pre.features)),
+   pred_col = "Pred.SOC.Fast"
+  )
+)
+
+model_name <- "SOC.Fast"
+
+
+
+### Clean data - this only needs to be done once
+clean.output <- f.clean.data.for.xgboost.external(office_ready)
+office_ext <- clean.output$office_ext
+
+names(office_ext) #%>% rename(CitizenStatus=Citiz)
+
+config <- model_configs[[model_name]]
+prep <- f.just.prepare.data.external(clean.output, config)
+
+c1 <-xgb_models[[model_name]]["feature_names"][[1]] 
+c2 <- colnames(prep[[2]])
+c1[!c1 %in% c2]
+c2[!c2 %in% c1]
+
+pred.ext <- predict(xgb_models[[model_name]], prep[[2]])
+office_ext[[config$pred_col]] <- pred.ext
+
+
+office_ext$DM <- clean.output$label.ext
+office_ext$sample.weight <-  clean.output$weight.sample.ext
+office_ext$Year <- clean.output$year.ext
+office_ext$two <- clean.output$ext.two
+office_ext$SEQN <- clean.output$SEQN.ext
+
+#office_ext$DM <- f.is.DM(office_ready)
+
+
+office_noogtt <- office_ext
+save(office_noogtt,file="NHANES-office-1999-2016-noOGTT-layered_all_2025.09.24-Binary.Rda")
+```
+
+
+```{r}
+df.mort3 <- full_join(office_noogtt %>% mutate(SEQN=as.character(SEQN)),
+                      mortality_clean %>% mutate(SEQN=as.character(seqn)),by=join_by(SEQN==SEQN,Year==Year)) %>% filter(is.na(two))
+
+
+
+```
+
+
+```{r}
+library(maxstat)
+
+# Find the cut-point in 'Pred.SOC.Fast' that maximally separates the groups
+mstat <- maxstat.test(Surv(permth_exm, as.integer(mortstat)) ~ Pred.SOC.Fast,
+                      data = df.mort3,
+                      smethod = "LogRank")
+
+optimal_cutoff <- mstat$estimate
+
+min.pred <- df.mort3 %>% filter(a1c >= 6.5 | fpg >= 126 ) %>% select(Pred.SOC.Fast) %>% min()
+
+if (optimal_cutoff > min.pred){
+  cat("Optimal cutoff higher than minimum predicted probability, will use minimum predicted probability")
+  optimal_cutoff <- min.pred
+  }
+
+
+# Store the optimal cut-point value in a variable
+
+
+# Print the value so you can see it
+cat("Optimal Cut-off for Pred.SOC.Fast:", optimal_cutoff, "\n")
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+prepare_survival_data <- function(input_df) {
+  input_df %>%
+    mutate(
+      #dm_status_combined = dplyr::coalesce(dm.told.x, dm.told.y),   # keep if you still need it elsewhere
+
+      actual_status = dplyr::case_when(
+        (!is.na(a1c) & a1c >= 6.5) | (!is.na(fpg) & fpg >= 126) ~ "Diabetes",
+        (!is.na(a1c) & a1c < 6.5)  | (!is.na(fpg) & fpg < 126)  ~ "No Diabetes",
+        TRUE ~ NA_character_
+      ),
+      # ------------------------------------------------------
+
+      event        = as.numeric(mortstat),          # 0 alive, 1 dead 
+      permth_exm   = as.numeric(permth_exm),
+      predicted_status = factor(ifelse(Pred.SOC.Fast >= optimal_cutoff,
+                                       "Predicted Diabetes",
+                                       "Predicted No Diabetes")),
+      actual_pred_group = interaction(actual_status, predicted_status,
+                                      sep = " / ", drop = TRUE)
+    ) %>%
+    dplyr::filter(
+      !is.na(actual_status),
+      !is.na(permth_exm) & permth_exm >= 0,
+      !is.na(event)
+    )
+}
+
+```
+
+
+```{r}
+# office_pre_final$Year %>% table()
+# df.mort3$Year %>% table()
+# 
+# names(office_pre_final)[!names(office_pre_final) %in% names(df.mort3)]
+# names(df.mort3)[!names(df.mort3) %in% names(office_pre_final)]
+# 
+# office_pre_final$ucod_leading <- office_pre_final$ucod_lead
+
+df.mo3 <- df.mort3 #rbind(office_pre_final %>% select(-c(ucod_lead)),
+                #df.mort3 %>% select(-c("seqn","eligstat","hyperten","permth_int","Pred.SOC.Fast","DM")))
+
+### COMBINE COMBINE
+df.mo3 %>% mutate(NAN = !is.na(Pred.SOC.Fast)) %>% select(NAN,Year) %>% table()
+save(df.mo3,file="NHANES-df.mo3_noogtt.Rda")
+
+```
+
+
+
+```{r}
+
+#survival_data     <- prepare_survival_data(office_test_final)
+survival_data_pre <- prepare_survival_data(df.mo3)
+survival_data_pre <- survival_data_pre %>%
+  mutate(predicted_status = ifelse(Pred.SOC.Fast >= optimal_cutoff,
+                                   "Predicted Diabetes",
+                                   "Predicted No Diabetes") %>% factor())
+
+
+#cat("TEST rows:", nrow(survival_data), "\n")
+cat("PRE  rows:", nrow(survival_data_pre), "\n")
+```
+
+
+```{r}
+```
+
+
+```{r}
+# debug_output <- survminer::surv_summary(fit_pred_pre, data = survival_data_pre)
+# 
+# # Print the names of ALL columns in the output
+# cat("The column names are:\n")
+# print(names(debug_output))
+# 
+# # Print the first few rows to see the content
+# cat("\n\nThe first few rows of the data look like this:\n")
+# print(head(debug_output))
+```
+
+```{r}
+
+survival_data_pre %>%  ggplot() + geom_point(aes(x=fpg,y=a1c,color=actual_status))
+
+survival_data_pre %>%  ggplot() + geom_point(aes(x=Pred.SOC.Fast,y=a1c,color=actual_status))
+
+```
+
+
+
+
+
+
+
+```{r}
+survival_data_pre %>% ggplot() + geom_histogram(aes(x = Pred.SOC.Fast, fill = actual_status), position = "dodge") + scale_y_log10() 
+
+
+survival_data_pre %>% ggplot() + geom_histogram(aes(x = Pred.SOC.Fast, fill = as.factor(mortstat)), position = "dodge") + scale_y_log10() 
+```
+
+
+```{r}
+
+library(ggplot2)
+library(survminer)
+library(patchwork)
+library(dplyr)
+library(stringr)
+library(survival)
+
+
+fit_actual_pre <- survfit(Surv(permth_exm, event) ~ actual_status,
+                          data = survival_data_pre)
+
+df_actual <- survminer::surv_summary(fit_actual_pre, data = survival_data_pre) %>%
+  mutate(source = "Actual",
+         group  = str_replace(strata, "actual_status=", ""))
+
+fit_pred_pre <- survfit(Surv(permth_exm, event) ~ predicted_status,
+                        data = survival_data_pre)
+
+df_predicted <- survminer::surv_summary(fit_pred_pre, data = survival_data_pre) %>%
+  mutate(source = "Predicted",
+         group = str_replace(strata, "predicted_status=", ""))
+
+df_combined <- bind_rows(df_actual, df_predicted)
+
+ggplot(df_combined, aes(time, surv, color = group, linetype = source)) +
+  geom_step(linewidth = 1.1) +
+  labs(title = "KM Curve – 2005-2016 Mortality Data",
+       x = "Time (months)",
+       y = "Survival Probability",
+       color = "Diabetes Group") +
+  scale_color_manual(values = c("Diabetes" = "red",
+                                "No Diabetes" = "blue",
+                                "Predicted Diabetes" = "darkblue",
+                                "Predicted No Diabetes" = "lightblue")) +
+  theme_minimal(base_size = 16) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5, size = 18),
+    legend.title = element_text(size = 14),
+    legend.text = element_text(size = 13),
+    legend.position = "right"
+  ) +
+  guides(linetype = "none") 
+
+```
+
+```{r}
+table(survival_data_pre$actual_status, survival_data_pre$predicted_status)
+
+interaction(survival_data_pre$actual_status, survival_data_pre$predicted_status,sep="  /  ",drop=FALSE) %>% table()
+
+# 1. rebuild predicted_status (if you changed the cutoff) AND the combo group
+survival_data_pre <- survival_data_pre %>%
+  mutate(
+    predicted_status   = factor(ifelse(Pred.SOC.Fast >= optimal_cutoff, "Predicted Diabetes", "Predicted No Diabetes")),
+    actual_pred_group  = interaction(actual_status, predicted_status,
+                                     sep = " / ", drop = FALSE)  # <-- keep ALL 4 levels
+  )
+
+table(survival_data_pre$actual_status, survival_data_pre$predicted_status)
+
+interaction(survival_data_pre$actual_status, survival_data_pre$predicted_status,sep="  /  ",drop=FALSE) %>% table()
+
+# 2. drop empty levels only AFTER you confirm counts (optional)
+# survival_data_pre$actual_pred_group <- droplevels(survival_data_pre$actual_pred_group)
+
+# 3. refit + plot (same code as before, now you'll have 4 strata)
+fit_detailed <- survfit(
+  Surv(permth_exm, event) ~ actual_pred_group,
+  data = survival_data_pre
+)
+
+labs   <- stringr::str_remove(names(fit_detailed$strata),
+                              "^actual_pred_group=")
+pal_all <- c("#D81B60", "#1B9E77", "#1F78B4", "#E6AB02")
+pal    <- pal_all[seq_along(labs)]
+
+p <- ggsurvplot(
+  fit_detailed,
+  data                  = survival_data_pre,
+  legend.labs           = labs,
+  palette               = pal,
+
+  risk.table            = TRUE,
+  risk.table.height     = 0.23,
+  risk.table.fontsize   = 3,
+  risk.table.y.text.col = TRUE,
+  risk.table.x.text     = TRUE,     # ← show month labels on risk table
+
+  tables.theme          = theme_cleantable(),
+  pval                  = TRUE,
+  pval.coord            = c(10, 0.1),
+  conf.int              = FALSE,
+  censor.shape          = 124,
+  censor.size           = 2.5,
+  break.time.by         = 50,
+
+  ggtheme               = theme_minimal(base_size = 14),  # ← smaller overall
+  title                 = "KM Curve by Actual & Predicted Status",
+  xlab                  = "Time (months)",
+  ylab                  = "Survival probability",
+  legend                = "none"
+)
+
+# fine‑tune just the title
+p$plot <- p$plot +  coord_cartesian(ylim = c(0.35, 1.0)) + 
+  theme(
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5) 
+  ) 
+
+# tighten up risk‑table margins
+p$table <- p$table +
+  theme(
+    axis.title.x = element_blank(),
+    plot.margin  = margin(t = 0, r = 5.5, b = 5.5, l = 5.5),
+    text         = element_text(size = 11)
+  )
+
+p
+
+
+
+```
+
+```{r}
+table(survival_data_pre$actual_status, survival_data_pre$predicted_status)
+
+interaction(survival_data_pre$actual_status, survival_data_pre$predicted_status,sep="  /  ",drop=FALSE) %>% table()
+
+# 1. rebuild predicted_status (if you changed the cutoff) AND the combo group
+survival_data_pre <- survival_data_pre %>%
+  mutate(
+    predicted_status   = factor(ifelse(Pred.SOC.Fast >= optimal_cutoff, "Predicted Diabetes", "Predicted No Diabetes")),
+    actual_pred_group  = interaction(actual_status, predicted_status,
+                                     sep = " / ", drop = FALSE)  # <-- keep ALL 4 levels
+  )
+
+table(survival_data_pre$actual_status, survival_data_pre$predicted_status)
+
+interaction(survival_data_pre$actual_status, survival_data_pre$predicted_status,sep="  /  ",drop=FALSE) %>% table()
+
+# 2. drop empty levels only AFTER you confirm counts (optional)
+# survival_data_pre$actual_pred_group <- droplevels(survival_data_pre$actual_pred_group)
+
+# 3. refit + plot (same code as before, now you'll have 4 strata)
+fit_detailed <- survfit(
+  Surv(permth_exm, event) ~ actual_pred_group,
+  data = survival_data_pre
+)
+
+labs   <- stringr::str_remove(names(fit_detailed$strata),
+                              "^actual_pred_group=")
+pal_all <- c("#D81B60", "#1B9E77", "#1F78B4", "#E6AB02")
+pal    <- pal_all[seq_along(labs)]
+
+names(fit_detailed$strata) <- c("DM / Predicted DM","No DM / Predicted DM","No DM / Predicted No DM")
+
+
+survival_data_pre$actual_pred_group <- factor(survival_data_pre$actual_pred_group,levels=c(
+  "No Diabetes / Predicted No Diabetes",
+  "No Diabetes / Predicted Diabetes",
+  "Diabetes / Predicted Diabetes",
+  "Diabetes / Predicted No Diabetes"
+  ))
+
+cox_model <- coxph(Surv(permth_exm, mortstat) ~ actual_pred_group, 
+                   data = survival_data_pre )
+
+tbl_regression(cox_model, exponentiate = TRUE)
+library(ggsurvfit)
+
+ggsurvfit(fit_detailed,size=2) +
+  labs(
+    x = "Months",
+    y = "Survival Probability",
+    #title = "Mortality (2005-2016)",
+  ) +   scale_color_manual(values = c("DM / Predicted DM" = "#D81B60",
+                                "No DM / Predicted DM" = "#1B9E77",
+                                "No DM / Predicted No DM" = "#1F78B4"))   +
+  theme_grey() + # 🎨 Change the palette here
+  #add_confidence_interval() + # Add confidence interval shading
+  add_risktable()    +         # Add a risk table below the plot
+  add_legend_title("Diabetes\nDiagnosis") + 
+  annotate("text",x=20,y=0.8,label=paste0("HR=",round(exp(cox_model$coefficients[1]),1),"\n","p<2e-16"),color="#1B9E77") + 
+  annotate("text",x=20,y=0.6,label=paste0("HR=",round(exp(cox_model$coefficients[2]),1),"\n","p<2e-16"),color="#D81B60") +theme.1;
+```
+```{r}
+library(survey)
+options(survey.lonely.psu = "adjust")
+options(survey.adjust.domain.lonely = TRUE)
+
+
+df.weights<- rbind( nhanes("DEMO",1999) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                     nhanes("DEMO_B",2001) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                     nhanes("DEMO_C",2003) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_D",2005) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_E",2007) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_F",2009) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_G",2011) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_H",2013) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
+                  nhanes("DEMO_I",2015) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR))                  
+
+
+
+survival_data_pre.weighted<-full_join(survival_data_pre %>% mutate(SEQN = sprintf("%05d", as.integer(str_trim(SEQN)))) ,
+          df.weights %>% mutate(SEQN = sprintf("%05d", as.integer(str_trim(SEQN)))) ,
+          by="SEQN")  %>% drop_na(WTMEC2YR)
+
+survival_data_pre.weighted$actual_pred_group <- droplevels(survival_data_pre.weighted$actual_pred_group) 
+survival_data_pre.weighted$actual_pred_group <- relevel(survival_data_pre.weighted$actual_pred_group,"No Diabetes / Predicted No Diabetes")
+
+
+# fit_detailed <- survfit(
+#   Surv(permth_exm, event) ~ actual_pred_group,
+#   data = survival_data_pre
+# )
+
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+km.out<-svykm(Surv(permth_exm,event) ~ actual_pred_group, design=design.INT)
+
+
+# plot(km.out,
+#      xlab = "Months",
+#      ylab = "Survival",
+#      pars=list(lty=1:3),
+#      ylim=list(c(0.4,1)))
+# legend(10,0.6,levels(survival_data_pre.weighted$actual_pred_group),lty=1:3)
+```
+
+
+```{r Middle}
+
+
+
+survival_data_pre.weighted <- survival_data_pre.weighted %>% 
+  mutate(domain_pred= complete.cases(permth_exm) & complete.cases(event) &
+                         complete.cases(actual_pred_group))
+
+survival_data_pre.weighted$actual_pred_group <- relevel(survival_data_pre.weighted$actual_pred_group,"No Diabetes / Predicted Diabetes")
+
+# Re-create the design to include the new domain variable
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+# Subset the design to do a domain analysis
+design_pred<- subset(design.INT, domain_pred)
+
+# Log-rank test
+svylogrank(Surv(permth_exm, event) ~ actual_pred_group, design = design_pred)[[2]]
+
+svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)
+exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][1])
+exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][2])
+hr.comp <- round(exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][2]),1)
+p.comp <- 0.02
+
+survival_data_pre.weighted$actual_pred_group <- relevel(survival_data_pre.weighted$actual_pred_group,"No Diabetes / Predicted No Diabetes")
+
+```
+
+
+
+```{r}
+
+```
+
+
+
+```{r Cox PH - Discrete}
+
+survival_data_pre.weighted <- survival_data_pre.weighted %>% 
+  mutate(domain_pred= complete.cases(permth_exm) & complete.cases(event) &
+                         complete.cases(actual_pred_group))
+
+# Re-create the design to include the new domain variable
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+# Subset the design to do a domain analysis
+design_pred<- subset(design.INT, domain_pred)
+
+# Log-rank test
+svylogrank(Surv(permth_exm, event) ~ actual_pred_group, design = design_pred)[[2]]
+
+svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)
+exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][1])
+exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][2])
+
+```
+
+
+```{r Cox PH - Continuous}
+
+survival_data_pre.weighted <- survival_data_pre.weighted %>% 
+  mutate(domain_pred= complete.cases(permth_exm) & complete.cases(event) &
+                         complete.cases(actual_pred_group))
+
+# Re-create the design to include the new domain variable
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+# Subset the design to do a domain analysis
+design_pred<- subset(design.INT, domain_pred)
+
+# Log-rank test
+svylogrank(Surv(permth_exm, event) ~ Pred.SOC.Fast, design = design_pred)[[2]]
+
+svycoxph(Surv(permth_exm,event) ~ Pred.SOC.Fast, design=design_pred)
+exp(svycoxph(Surv(permth_exm,event) ~ Pred.SOC.Fast, design=design_pred)[[1]][1])
+
+```
+
+
+```{r}
+# This is a conceptual example as the exact transformation of svykm to
+# the required survminer data frame format might need careful handling
+# of confidence intervals if svykm was run with se=TRUE.
+library(survey)
+library(survminer)
+library(dplyr)
+
+# Assuming 'survival_data_pre.weighted' and your design.INT are already defined
+# And assuming you've run the data extraction steps from the previous response
+# to create 'survminer_data' correctly.
+
+# Example of how survminer_data should look (from previous response):
+if ("svykmlist" %in% class(km.out)) {
+  survminer_data <- data.frame()
+  for (i in seq_along(km.out)) {
+    group_name <- names(km.out)[i]
+    temp_data <- data.frame(
+      time = km.out[[i]]$time,
+      surv = km.out[[i]]$surv,
+      strata = group_name
+      # If km.out had se=TRUE, include lower/upper CIs
+      #conf.low = km.out[[i]]$lower,
+      #conf.high = km.out[[i]]$upper
+    )
+    survminer_data <- rbind(survminer_data, temp_data)
+  }
+  survminer_data$strata <- gsub("actual_pred_group=", "", survminer_data$strata)
+} else {
+  survminer_data <- data.frame(
+    time = km.out$time,
+    surv = km.out$surv,
+    strata = "Overall"
+    #conf.low = km.out$lower, # if se=TRUE
+    #conf.high = km.out$upper # if se=TRUE
+  )
+}
+```
+
+
+```{r}
+
+```
+
+```{r}
+survminer_data$strata <- lapply(survminer_data$strata,function(x) gsub("Diabetes","DM",x)) %>% unlist()
+survminer_data$strata <- factor(survminer_data$strata,levels=c("No DM / Predicted No DM",
+                                                               "No DM / Predicted DM",
+                                                               "DM / Predicted DM",
+                                                               "DM / Predicted No DM"))
+
+survminer_data$strata<-recode(survminer_data$strata,"No DM / Predicted No DM"="No DM: Predicted No DM",
+                              "No DM / Predicted DM"="No DM: Predicted DM",
+                              "DM / Predicted DM"="DM: Predicted DM",
+                              "DM / Predicted No DM"="DM: Predicted No DM")
+
+survminer_data$strata <- factor(survminer_data$strata,levels=c("No DM: Predicted No DM",
+                                                               "No DM: Predicted DM",
+                                                               "DM: Predicted DM",
+                                                               "DM: Predicted No DM"))
+```
+
+
+```{r}
+
+
+###
+
+
+#####
+
+survminer_data %>% filter(strata=="No DM: Predicted No DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull()
+survminer_data %>% filter(strata=="No DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull()
+survminer_data %>% filter(strata=="DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull()
+
+
+survival_data_pre.weighted$actual_pred_group <- relevel(survival_data_pre.weighted$actual_pred_group,"No Diabetes / Predicted No Diabetes")
+
+# Re-create the design to include the new domain variable
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+# Subset the design to do a domain analysis
+design_pred<- subset(design.INT, domain_pred)
+
+
+hr.no.dm.pred.dm <-round(exp(svycoxph(Surv(permth_exm,mortstat) ~ actual_pred_group, design=design_pred)[[1]][1]),1) 
+hr.dm.pred.dm <-round(exp(svycoxph(Surv(permth_exm,mortstat) ~ actual_pred_group, design=design_pred)[[1]][2]),1) 
+print(summary(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred))$coefficients[, "Pr(>|z|)"][1])
+print(summary(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred))$coefficients[, "Pr(>|z|)"][2])
+
+hr.1 <- hr.no.dm.pred.dm
+hr.2 <- hr.dm.pred.dm
+
+survival_data_pre.weighted$actual_pred_group <- relevel(survival_data_pre.weighted$actual_pred_group,"No Diabetes / Predicted Diabetes")
+
+# Re-create the design to include the new domain variable
+design.INT <- svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=survival_data_pre.weighted)
+
+# Subset the design to do a domain analysis
+design_pred<- subset(design.INT, domain_pred)
+
+hr.comp <- round(exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred)[[1]][2]),1)
+print(summary(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred))$coefficients[, "Pr(>|z|)"][1])
+print(summary(svycoxph(Surv(permth_exm,event) ~ actual_pred_group, design=design_pred))$coefficients[, "Pr(>|z|)"][2])
+p.comp <- 0.17
+
+
+hr.3 <- hr.comp
+p.3 <- p.comp
+
+x.1 = 260
+x.2 = 265
+x.3 = 255
+
+df.seg.1 <- data.frame(x1=x.1,x2=x.1,
+                       y1=survminer_data %>% filter(strata=="No DM: Predicted No DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull(),
+                       y2=survminer_data %>% filter(strata=="No DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull())
+
+df.seg.2 <- data.frame(x1=x.2,x2=x.2,
+                       y1=survminer_data %>% filter(strata=="No DM: Predicted No DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull(),
+                       y2=survminer_data %>% filter(strata=="DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull())
+
+
+
+df.seg.3 <- data.frame(x1=x.3,x2=x.3,
+                       y1=survminer_data %>% filter(strata=="No DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull(),
+                       y2=survminer_data %>% filter(strata=="DM: Predicted DM") %>% filter(surv==min(surv)) %>% select(surv) %>% unique() %>% pull())
+
+
+
+
+
+# Correct call:
+plt.km.99.16.pred<-ggsurvplot_df(
+  fit = survminer_data, # Pass the data frame to 'fit'
+  # The columns 'time', 'surv', 'strata' are expected to be *in* survminer_data
+  # You do NOT specify them as separate arguments time="time", surv="surv", strata="strata"
+  xlab = "Months",
+  ylab = "Survival",
+  #legend.labs = levels(survival_data_pre.weighted$actual_pred_group),
+  #linetype = "strata", # This correctly tells it to use the 'strata' column for linetypes
+  size=2
+) + ylim(0.4,1) + theme.1 + theme_grey() +   
+  scale_color_manual(values = c("No DM: Predicted No DM" = "#1F78B4",
+                                "No DM: Predicted DM" = "#1B9E77",
+                                "DM: Predicted DM" = "#D81B60")) +
+  #add_legend_title("Diabetes\nDiagnosis") + 
+  annotate("text",x=20,y=0.75,label=paste0("* HR=",hr.1,"\n","p < 2e-16"),color="#1B9E77") + 
+  annotate("text",x=20,y=0.60,label=paste0("+ HR=",hr.2,"\n","p < 2e-16"),color="#D81B60") +
+  annotate("text",x=20,y=0.45,label=paste0("∆ HR=",hr.3,"\n","p < ",p.3),color="black") +
+  geom_segment(data=df.seg.1,aes(x=x1,xend=x2,y=y1,yend=y2),size=1) + coord_cartesian(xlim = c(0,260)) +
+  annotate("text",x=df.seg.1$x1,y=1.01*max(df.seg.1$y1,df.seg.1$y2),label="*",size=5) +
+  geom_segment(data=df.seg.2,aes(x=x1,xend=x2,y=y1,yend=y2),size=1) +  
+  annotate("text",x=df.seg.2$x1,y=1.02*max(df.seg.2$y1,df.seg.2$y2),label="+",size=5) +
+  geom_segment(data=df.seg.3,aes(x=x1,xend=x2,y=y1,yend=y2),size=1) + 
+  annotate("text",x=df.seg.3$x1,y=1.03*max(df.seg.3$y1,df.seg.3$y2),label="∆",size=5) ;plot(plt.km.99.16.pred)
+
+
+
+
+```
+
+
+
+
+```{r}
+
+#full_join(survival_data %>% mutate(SEQN=as.integer(SEQN)),df.weights %>% mutate(SEQN=as.integer(SEQN)),join_by(SEQN==SEQN)) %>% relocate(SEQN)  %>% filter(!is.na(SDMVSTRA))
+
+```
+
+```{r}
+
+# 1 = Diseases of heart (I00-I09, I11, I13, I20-I51)
+# 2 = Malignant neoplasms (C00-C97)
+# 3 = Chronic lower respiratory diseases (J40-J47)
+# 4 = Accidents (unintentional injuries) (V01-X59, Y85-Y86)
+# 5 = Cerebrovascular diseases (I60-I69)
+# 6 = Alzheimer's disease (G30)
+# 7 = Diabetes mellitus (E10-E14)
+# 8 = Influenza and pneumonia (J09-J18)
+# 9 = Nephritis, nephrotic syndrome and nephrosis (N00-N07, N17-N19, N25-N27)
+# 10 = All other causes (residual)
+# <NA> = Ineligible, under age 18, assumed alive, or no cause of death data available
+
+t1 <- survival_data_pre.weighted %>% select(actual_pred_group,ucod_leading) %>% table() ; print(t1)
+t1[1,] / sum(t1[1,])
+t1[2,] / sum(t1[2,])
+t1[3,] / sum(t1[3,])
+
+
+t1 <- survival_data_pre.weighted %>% select(actual_pred_group,diabetes) %>% table(); print(t1)
+t1[1,] / sum(t1[1,])
+t1[2,] / sum(t1[2,])
+t1[3,] / sum(t1[3,])
+```
+
+```{r Data - Leading Cause of Death}
+
+data <- survival_data_pre.weighted %>% filter(!is.na(mortstat),!is.na(diabetes))
+data$DM1 <- as.integer(data$ucod_leading==7)
+data$DM2 <- data$diabetes
+
+
+
+# Create the survey design object using your weights column
+#survey_design <- svydesign(ids = ~1, data = data, weights = ~WTMEC2YR)
+
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+
+
+# Calculate the weighted mean of DM1 for each exposure group
+# This gives the weighted proportion of the outcome (DM1 = 1)
+weighted_props <- svyby(~DM1, ~actual_pred_group, survey_design, svymean)
+
+rownames(weighted_props) <- lapply(rownames(weighted_props),function(x) gsub("Diabetes","DM",gsub(" \\/",":",x))) %>% unlist()
+weighted_props$actual_pred_group <- factor(lapply(weighted_props$actual_pred_group,function(x) gsub("Diabetes","DM",gsub(" \\/",":\n",x))) %>% unlist())
+weighted_props$actual_pred_group <- factor(weighted_props$actual_pred_group,levels=c("No DM:\n Predicted No DM" ,"No DM:\n Predicted DM","DM:\n Predicted DM"))
+
+
+
+df.lines <- data.frame(x1=c(1,2,1),
+                               x2=c(2,3,3),
+                               y1=c(0.15,0.175,0.2)-0.08)
+df.points <- data.frame(x1=c(1.5,2.5,2),
+                               y1=0.005+c(0.15,0.175,0.2)-0.08,
+                        char=c("*","***","***")) # 0.00803,3.49e-10,2.26e-10 (8e-3,4e-10,4e-10)
+
+# Plot the results using ggplot2
+plt.DMlead <- ggplot(weighted_props, aes(x = actual_pred_group, y = `DM1`)) +
+  geom_bar(aes( fill = actual_pred_group),stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = sprintf("%.2f%%", `DM1` * 100)), vjust = -0.5) +
+  labs(
+    title = "Diabetes as Lead Cause of Death",
+    x = "Predicted Risk Group",
+    y = "Proportion with Outcome"
+  ) +
+    scale_fill_manual(values = c("No DM:\n Predicted No DM" = "#1F78B4",
+                                "No DM:\n Predicted DM" = "#1B9E77",
+                                "DM:\n Predicted DM" = "#D81B60")) + 
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 0.41)) +
+  theme_minimal(base_size = 14) + theme.1 + theme_grey() + 
+  theme(legend.position = "none") +
+  geom_segment(data=df.lines,aes(x=x1,xend=x2,y=y1,yend=y1)) + 
+  geom_text(data=df.points,aes(x=x1,y=y1,label=char)); plot(plt.DMlead)
+  
+
+
+
+
+data$actual_pred_group <- relevel(data$actual_pred_group,"No Diabetes / Predicted No Diabetes")
+
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM1 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+
+data$actual_pred_group <- relevel(data$actual_pred_group,"No Diabetes / Predicted Diabetes")
+
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM1 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+
+# Exponentiate coefficients to get the Odds Ratios
+odds_ratios <- exp(coef(model))
+
+# Get the confidence intervals for the Odds Ratios
+conf_intervals <- exp(confint(model))
+
+# Combine into a final, easy-to-read table
+results_table <- data.frame(
+  Odds_Ratio = odds_ratios,
+  CI_Lower = conf_intervals[, 1],
+  CI_Upper = conf_intervals[, 2],
+  p_value = summary(model)$coefficients[,4]
+)
+
+print(round(results_table, 3))
+
+```
+
+
+
+
+
+
+```{r Data All - Diabetes Contributing Factor}
+# Create the survey design object using your weights column
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Calculate the weighted mean of DM2 for each exposure group
+# This gives the weighted proportion of the outcome (DM2 = 1)
+weighted_props <- svyby(~DM2, ~actual_pred_group, survey_design, svymean)
+
+rownames(weighted_props) <- lapply(rownames(weighted_props),function(x) gsub("Diabetes","DM",gsub(" \\/",":",x))) %>% unlist()
+weighted_props$actual_pred_group <- factor(lapply(weighted_props$actual_pred_group,function(x) gsub("Diabetes","DM",gsub(" \\/",":\n",x))) %>% unlist())
+weighted_props$actual_pred_group <- factor(weighted_props$actual_pred_group,levels=c("No DM:\n Predicted No DM" ,"No DM:\n Predicted DM","DM:\n Predicted DM"))
+
+
+df.lines <- data.frame(x1=c(1,2,1),
+                               x2=c(2,3,3),
+                               y1=0.025+c(0.325,0.35,0.375))
+df.points <- data.frame(x1=c(1.5,2.5,2),
+                               y1=0.03+c(0.325,0.35,0.375),
+                        char=c("**","***","***")) # 0.000263, 2e-16, 2e-16 (3e-4,4e-10,4e-10)
+
+
+# Plot the results using ggplot2
+plt.DMcontr<-ggplot(weighted_props, aes(x = actual_pred_group, y = `DM2`)) +
+  geom_bar(aes(fill = actual_pred_group),stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = sprintf("%.2f%%", `DM2` * 100)), vjust = -0.5) +
+  labs(
+    title = "Diabetes as Contributing to Death",
+    x = "Predicted Risk Group",
+    y = "Proportion with Outcome"
+  ) +
+  scale_fill_manual(values = c("No DM:\n Predicted No DM" = "#1F78B4",
+                                "No DM:\n Predicted DM" = "#1B9E77",
+                                "DM:\n Predicted DM" = "#D81B60")) +  
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 0.41)) +
+  theme_minimal(base_size = 14) + theme.1 + theme_grey() + 
+  theme(legend.position = "none")  +
+  geom_segment(data=df.lines,aes(x=x1,xend=x2,y=y1,yend=y1)) + 
+  geom_text(data=df.points,aes(x=x1,y=y1,label=char));plot(plt.DMcontr)
+  
+
+data$actual_pred_group <- relevel(data$actual_pred_group,"No Diabetes / Predicted No Diabetes")
+
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM2 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+data$actual_pred_group <- relevel(data$actual_pred_group,"No Diabetes / Predicted Diabetes")
+
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM2 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+
+
+# Exponentiate coefficients to get the Odds Ratios
+odds_ratios <- exp(coef(model))
+
+# Get the confidence intervals for the Odds Ratios
+conf_intervals <- exp(confint(model))
+
+# Combine into a final, easy-to-read table
+results_table <- data.frame(
+  Odds_Ratio = odds_ratios,
+  CI_Lower = conf_intervals[, 1],
+  CI_Upper = conf_intervals[, 2],
+  p_value = summary(model)$coefficients[,4]
+)
+
+print(round(results_table, 3))
+```
+
+
+
+```{r}
+
+
+g1<-grid.arrange(plt.km.99.16.pred + labs(tag="A"),
+             grid.arrange(ncol=2,plt.DMlead+ labs(tag="B"),plt.DMcontr+ labs(tag="C"))
+)
+ggsave(plot = g1,filename = "Surv-DM-cause.png",width=7,height=7,units="in")
+
+```
+
+
+```{r Data A1c & FPG - Leading Cause of Death}
+
+data <- survival_data_pre.weighted %>% filter(!is.na(mortstat),!is.na(diabetes)) %>% drop_na(a1c,fpg)
+data$DM1 <- as.integer(data$ucod_leading==7)
+data$DM2 <- data$diabetes
+
+
+
+# Create the survey design object using your weights column
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+
+# Calculate the weighted mean of DM1 for each exposure group
+# This gives the weighted proportion of the outcome (DM1 = 1)
+weighted_props <- svyby(~DM1, ~actual_pred_group, survey_design, svymean)
+
+rownames(weighted_props) <- lapply(rownames(weighted_props),function(x) gsub("Diabetes","DM",x)) %>% unlist()
+weighted_props$actual_pred_group <- factor(lapply(weighted_props$actual_pred_group,function(x) gsub("Diabetes","DM",x)) %>% unlist())
+weighted_props$actual_pred_group <- factor(weighted_props$actual_pred_group,levels=c("No DM: Predicted No DM" ,"No DM: Predicted DM","DM: Predicted DM"))
+
+# Plot the results using ggplot2
+ggplot(weighted_props, aes(x = actual_pred_group, y = `DM1`, fill = actual_pred_group)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = sprintf("%.2f%%", `DM1` * 100)), vjust = -0.5) +
+  labs(
+    title = "Weighted Proportion of Outcome (DM1=1) by Risk Group",
+    x = "Predicted Risk Group",
+    y = "Proportion with Outcome"
+  ) +
+    scale_fill_manual(values = c("No DM: Predicted No DM" = "#1F78B4",
+                                "No DM: Predicted DM" = "#1B9E77",
+                                "DM: Predicted DM" = "#D81B60")) +  
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 0.4)) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM1 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+
+# Exponentiate coefficients to get the Odds Ratios
+odds_ratios <- exp(coef(model))
+
+# Get the confidence intervals for the Odds Ratios
+conf_intervals <- exp(confint(model))
+
+# Combine into a final, easy-to-read table
+results_table <- data.frame(
+  Odds_Ratio = odds_ratios,
+  CI_Lower = conf_intervals[, 1],
+  CI_Upper = conf_intervals[, 2],
+  p_value = summary(model)$coefficients[,4]
+)
+
+print(round(results_table, 3))
+
+```
+
+
+
+
+
+
+```{r Data A1c & FPG - Diabetes Contributing Factor}
+# Create the survey design object using your weights column
+survey_design <-svydesign(strata=~SDMVSTRA, id=~SDMVPSU, weights=~WTMEC2YR,
+                        nest=TRUE, data=data)
+
+# Calculate the weighted mean of DM2 for each exposure group
+# This gives the weighted proportion of the outcome (DM2 = 1)
+weighted_props <- svyby(~DM2, ~actual_pred_group, survey_design, svymean)
+
+
+
+rownames(weighted_props) <- lapply(rownames(weighted_props),function(x) gsub("Diabetes","DM",x)) %>% unlist()
+weighted_props$actual_pred_group <- factor(lapply(weighted_props$actual_pred_group,function(x) gsub("Diabetes","DM",x)) %>% unlist())
+# Plot the results using ggplot2
+ggplot(weighted_props, aes(x = actual_pred_group, y = `DM2`, fill = actual_pred_group)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  geom_text(aes(label = sprintf("%.2f%%", `DM2` * 100)), vjust = -0.5) +
+  labs(
+    title = "Weighted Proportion of Outcome (DM2=1) by Risk Group",
+    x = "Predicted Risk Group",
+    y = "Proportion with Outcome"
+  ) +
+  scale_color_manual(values = c("No DM: Predicted No DM" = "#1F78B4",
+                                "No DM: Predicted DM" = "#1B9E77",
+                                "DM: Predicted DM" = "#D81B60")) +  
+  scale_y_continuous(labels = scales::percent_format(), limits = c(0, 0.6)) +
+  theme_minimal(base_size = 14) +
+  theme(legend.position = "none")
+
+# Fit the weighted logistic regression model
+model <- svyglm(DM2 ~ actual_pred_group,
+                design = survey_design,
+                family = quasibinomial())
+
+# View the detailed model summary
+summary(model)
+
+
+# Exponentiate coefficients to get the Odds Ratios
+odds_ratios <- exp(coef(model))
+
+# Get the confidence intervals for the Odds Ratios
+conf_intervals <- exp(confint(model))
+
+# Combine into a final, easy-to-read table
+results_table <- data.frame(
+  Odds_Ratio = odds_ratios,
+  CI_Lower = conf_intervals[, 1],
+  CI_Upper = conf_intervals[, 2],
+  p_value = summary(model)$coefficients[,4]
+)
+
+print(round(results_table, 3))
+```
+
+
+
+```{r}
+library(maxstat)
+
+# Find the cut-point in 'Pred.SOC.Fast' that maximally separates the groups
+mstat <- maxstat.test(Surv(permth_exm, event) ~ Pred.SOC.Fast,
+                      data = survival_data_pre,
+                      smethod = "LogRank")
+
+# Store the optimal cut-point value in a variable
+optimal_cutoff <- mstat$estimate
+
+# Print the value so you can see it
+cat("Optimal Cut-off for Pred.SOC.Fast:", optimal_cutoff, "\n")
+```
+
+```{r}
+cox_model <- coxph(Surv(permth_exm, event) ~ predicted_status, 
+                   data = survival_data_pre)
+
+tbl_regression(cox_model, exponentiate = TRUE)
+# check if identifies the best cut point (for Pred.SOC.Fast)
+
+```
+
+
+```{r}
+data_releveled <- survival_data_pre %>%
+  mutate(
+    predicted_status = fct_relevel(predicted_status, "Predicted No Diabetes")
+  )
+
+cox_model_new_ref <- coxph(Surv(permth_exm, event) ~ predicted_status, 
+                           data = data_releveled)
+
+tbl_regression(cox_model_new_ref, exponentiate = TRUE)
+
+```

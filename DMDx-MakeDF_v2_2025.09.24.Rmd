@@ -1,0 +1,518 @@
+---
+title: "BinaryOutput"
+output: html_document
+date: "2025-09-24"
+---
+
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+options(prType='html')
+
+
+packages <- c(
+    "dplyr",
+    "data.table",
+    "knitr",
+    "foreign",
+    "tidyverse",
+    "nhanesA"
+)
+
+
+for (pkg in packages) {
+  # Check if the package is not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    # If not, install it from CRAN
+    install.packages(pkg)
+  }
+  # Load the package into the R session
+  library(pkg, character.only = TRUE)
+}
+
+
+```
+
+
+```{r Import NHANES 1999 files}
+# data for 1999 
+
+demo_1999 <- nhanes("DEMO", 1999)
+bmx_1999 <- nhanesA::nhanes("BMX", 1999)
+bpx_1999 <-nhanes("BPX", 1999)
+mcq_1999 <- nhanes("MCQ", 1999)
+diq_1999 <- nhanes("DIQ", 1999)
+l10_1999 <- nhanes("LAB10", 1999)
+l10am_1999 <- nhanes("LAB10AM", 1999)
+lb25_1999 <- nhanes("LAB25", 1999)
+lb18_1999 <- nhanes("LAB18", 1999)
+bpq_1999 <- nhanes("BPQ", 1999)
+
+bpx_1999$BPXSY <- rowMeans(
+  bpx_1999[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+  na.rm = TRUE
+)
+
+bpx_1999$BPXDI <- rowMeans(
+  bpx_1999[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+  na.rm = TRUE
+)
+
+vars.all.1999 <- c(
+  "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST",
+  "BMXARMC","BPXPULS","BPQ020",
+  #"DIQ160","SLD012","DIQ180",
+  "MCQ080","MCQ092",
+  #"SLQ050",
+  "DIQ010",
+  #"DIQ170",
+  "MCQ250C","MCQ010","MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI",
+  "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI","LBXMPSI","LBXRBCSI","LBXHGB","LBXMC",
+  "LBXBAPCT","LBXWBCSI","LBXRDW","LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU","LBXGLU",
+  "LBXSCR","LBXSCA","LBXSTP","LBXSTB","LBXSAL","LBXSASSI","LBXSATSI","LBXSAPSI","LBXGH","WTSAF2YR",
+  "WTMEC2YR"
+)
+
+df_1999 <- reduce(
+  list(demo_1999, bmx_1999, bpx_1999, mcq_1999, diq_1999, l10_1999, l10am_1999, lb25_1999, lb18_1999, bpq_1999),
+  full_join,
+  by = "SEQN"
+) %>%
+  select(any_of(vars.all.1999)) %>%
+  mutate(Year = 1999) 
+
+```
+
+
+```{r Import NHANES 2001 + 2003 files}
+
+# importing, adjusting, cleaning data
+
+demo_2001 <- nhanesA::nhanes("DEMO", 2001)
+bpx_2001 <- nhanesA::nhanes("BPX_B", 2001)
+bmx_2001 <- nhanesA::nhanes("BMX_B", 2001)
+l10_2001 <- nhanesA::nhanes("L10_B", 2001)
+l10am_2001 <- nhanesA::nhanes("L10AM_B", 2001)
+l25_2001 <- nhanesA::nhanes("L25_B", 2001)
+l40_2001 <- nhanesA::nhanes("L40_B", 2001)
+l40_2_2001 <- nhanesA::nhanes("L40_2_B", 2001)
+bpq_2001 <- nhanesA::nhanes("BPQ_B", 2001)
+diq_2001 <- nhanesA::nhanes("DIQ_B", 2001)
+mcq_2001 <- nhanesA::nhanes("MCQ_B", 2001)
+
+bpx_2001$BPXSY <- rowMeans(
+  bpx_2001[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+  na.rm = TRUE
+)
+
+bpx_2001$BPXDI <- rowMeans(
+  bpx_2001[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+  na.rm = TRUE
+)
+
+vars.all.2001 <- c(
+  "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST",
+  "BMXARMC","BPXPULS","BPQ020", "MCQ080","MCQ092","DIQ010", "MCQ250C","MCQ010",
+  "MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI", "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI",
+  "LBXMPSI","LBXRBCSI","LBXHGB","LBXMC","LBXBAPCT","LBXWBCSI","LBXRDW", "LBXGLU",
+  "LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU","LBDSCR","LBXSCA","LBXSTP","LBDSTB",
+  "LBXSAL","LBXSASSI","LBXSATSI","LB2SAPSI","LBXGH","WTSAF2YR","WTMEC2YR"
+)
+
+df_2001 <- list(
+  demo_2001,
+  bpx_2001,  bmx_2001,  l10_2001, l10am_2001, l25_2001, l40_2001,
+  l40_2_2001, bpq_2001,  diq_2001,  mcq_2001
+) %>%
+  reduce(full_join, by = "SEQN")  %>%
+  select(any_of(vars.all.2001)) %>% 
+  mutate(Year = 2001)
+
+if ("LBDSCR" %in% names(df_2001)) {
+  df_2001 <- df_2001 %>% rename(LBXSCR = LBDSCR)
+}
+if ("LBDSTB" %in% names(df_2001)) {
+  df_2001 <- df_2001 %>% rename(LBXSTB = LBDSTB)
+}
+if ("LB2SAPSI" %in% names(df_2001)) {
+  df_2001 <- df_2001 %>% rename(LBXSAPSI = LB2SAPSI)
+}
+
+demo_2003 <- nhanesA::nhanes("DEMO", 2003)
+bpx_2003 <- nhanesA::nhanes("BPX_C", 2003)
+bmx_2003 <- nhanesA::nhanes("BMX_C", 2003)
+l10_2003 <- nhanesA::nhanes("L10_C", 2003)
+l10am_2003 <- nhanesA::nhanes("L10AM_B", 2003)
+l25_2003 <- nhanesA::nhanes("L25_C", 2003)
+l40_2003 <- nhanesA::nhanes("L40_C", 2003)
+bpq_2003 <- nhanesA::nhanes("BPQ_C", 2003)
+diq_2003 <- nhanesA::nhanes("DIQ_C", 2003)
+mcq_2003 <- nhanesA::nhanes("MCQ_C", 2003)
+
+bpx_2003$BPXSY <- rowMeans(
+  bpx_2003[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+  na.rm = TRUE
+)
+
+bpx_2003$BPXDI <- rowMeans(
+  bpx_2003[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+  na.rm = TRUE
+)
+
+vars.all.2003 <- c(
+  "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST",
+  "BMXARMC","BPXPULS","BPQ020",
+  #"DIQ160","SLD012","DIQ180",
+  "MCQ080","MCQ092",
+  #"SLQ050",
+  "DIQ010",
+  #"DIQ170",
+  "MCQ250C", "MCQ010","MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI",
+  "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI","LBXMPSI","LBXRBCSI","LBXHGB","LBXMC",
+  "LBXBAPCT","LBXWBCSI","LBXRDW","LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU", "LBXGLU",
+  "LBXSCR","LBXSCA","LBXSTP","LBXSTB","LBXSAL","LBXSASSI","LBXSATSI","LBXSAPSI","LBXGH","WTSAF2YR",
+  "WTMEC2YR"
+)
+
+df_2003 <- list(
+  demo_2003,
+  bpx_2003,  bmx_2003,  l10_2003, l10am_2003, l25_2003, l40_2003, 
+  bpq_2003,  diq_2003,  mcq_2003
+) %>%
+  reduce(full_join, by = "SEQN")  %>%
+  select(any_of(vars.all.2003)) %>% 
+  mutate(Year = 2003)
+
+```
+
+
+```{r Make df_combined}
+unique_columns <- unique(c(names(df_1999), names(df_2001), names(df_2003)))
+
+
+df_1999_final <- df_1999 %>% select(any_of(unique_columns))
+df_2001_final <- df_2001 %>% select(any_of(unique_columns))
+df_2003_final <- df_2003 %>% select(any_of(unique_columns))
+
+df_combined <- bind_rows(df_1999_final, df_2001_final, df_2003_final)
+
+
+```
+
+
+
+```{r Test df_combined}
+df_combined %>% select(LBXGLU,Year) %>% mutate(Exist=!is.na(LBXGLU)) %>% select(Exist,Year)%>% table()
+```
+
+
+
+```{r Make 2005-2016 data}
+letters <- c('D','E','F','G','H','I')
+years <- c(2005,2007,2009,2011,2013,2015)
+
+vars.no.adjust <- c('DEMO','CBC','ALQ','BPQ','DIQ','MCQ',
+                    'BPX','BPXO','GHB','BMX','SLQ','HEPA',
+                    'HEPB_S','HEPE','FASTQX') 
+#omitted DXXAG, HEPC, HEPE, MGX added BPXO
+
+vars.need.adjust <- c('OGTT','GLU','INS','BIOPRO','HEPBD', 'ALB_CR') 
+cols <- c('BMIRECUM','MCQ240D','BPAEN1','MCQ240L','MCQ240B',
+          'DIQ175A','DMDHHSIZ','DMDFMSIZ','DMDHHSZA','DMDHHSZB','DMDHHSZE')
+
+no.var.let <- c('BPXO_D', 'BPXO_E', 'BPXO_F', 'BPXO_G','BPXO_H', 
+                'DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D',
+                'MGX_E','MGX_F','HEPE_D','HEPE_E','INS_D',
+                'INS_E','INS_F','INS_G')
+
+var.let <- c()
+
+# Function to match column types
+match_column_types <- function(df1, df2) {
+  common_cols <- intersect(names(df1), names(df2))
+  
+  for (col in common_cols) {
+    if (class(df1[[col]]) != class(df2[[col]])) {
+      # If one is factor, convert to character
+      if (is.factor(df1[[col]])) df1[[col]] <- as.character(df1[[col]])
+      if (is.factor(df2[[col]])) df2[[col]] <- as.character(df2[[col]])
+      
+      # If one is numeric and the other is character, convert both to character
+      if ((is.numeric(df1[[col]]) & is.character(df2[[col]])) | 
+          (is.character(df1[[col]]) & is.numeric(df2[[col]]))) {
+        df1[[col]] <- as.character(df1[[col]])
+        df2[[col]] <- as.character(df2[[col]])
+      }
+    }
+  }
+  return(list(df1, df2))
+}
+
+vars <- c(vars.no.adjust,vars.need.adjust)
+
+for (i in 1:length(vars)){
+  j = 1
+  var <- vars[i]
+    # Use flipped order for "P" 
+  if (letters[j] == "P") {                       
+    var.let <- paste0(letters[j], '_', var)
+  } else {
+    var.let <- paste0(var, '_', letters[j])
+  }
+  
+  while ( (var.let %in% no.var.let) & (j <= length(letters)) ){
+    j <- j+ 1
+    # Use flipped order for "P"
+    if (letters[j] == "P") {                  
+      var.let <- paste0(letters[j], '_', var)
+    } else {
+      var.let <- paste0(var, '_', letters[j])
+    }
+  }
+    var.let <- paste0(var,'_',letters[j])
+
+    while ( (var.let %in% no.var.let) & (j <= length(letters)) ){
+    j <- j+ 1
+  }
+  print(letters[j])
+  if (j <= length(letters)) {
+    # Checking if dataset actually exists
+   
+     temp_df <- nhanes(var.let)
+    if (is.null(temp_df)) {
+      warning(paste("Dataset", var.let, "not found. Skipping this iteration."))
+      next  # Skip this iteration if dataset is missing.
+    }
+     
+    # Use the retrieved dataset (temp_df) rather than re-calling nhanes()
+    let.lab <- temp_df %>% mutate(Year = years[j])
+    
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){
+      let.lab <- let.lab  %>%     mutate(LBDHD=factor(
+        LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+    
+    
+    ### HEPBD adjustment
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){
+      let.lab <- let.lab  %>%     mutate(LBDHD=factor(
+        LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+    
+    j <- j+1
+  }
+  #print(j)
+  while (j<=length(letters)){
+    let <- letters[j]
+    
+    #Flip if letter is "P"
+    if (let == "P") {                         
+      var.let <- paste0(let, '_', var)
+    } else {
+      var.let <- paste0(var, '_', let)
+    }
+    #print(var.let)
+    #print(! var.let %in% no.var.let)
+    if (! var.let %in% no.var.let) {
+      
+      
+      # Retrieving and checking if dataset exists
+      temp_lab <- nhanes(var.let)
+      if (is.null(temp_lab)) {
+        warning(paste("Dataset", var.let, "not found. Skipping this iteration."))
+      } else {
+        # Use the retrieved dataset (temp_lab) for mutate()
+        lab <- temp_lab %>% mutate(Year = years[j])
+        if (var.let %in% c("HEPBD_D", "HEPBD_E", "HEPBD_F")) {
+          lab <- lab %>% mutate(LBDHD = factor(
+            LBDHD,levels = c(1,2),labels = c('Positive','Negative')))
+        }
+        # Apply type matching
+        combo <- match_column_types(let.lab, lab)
+        let.lab <- combo[[1]]
+        lab <- combo[[2]]
+        
+        # [CHANGE] Instead of restricting to common columns, bind rows directly.
+        let.lab <- dplyr::bind_rows(let.lab, lab)
+      }
+    }
+    
+    j=j+1
+  }
+      for (col in cols){
+        if(sum(col %in% names(let.lab) ) ==1){ let.lab[,col] <- as.numeric(let.lab[,col]) } # specific columns changed to make numeric 
+      }
+        if(i==1){vars.lab <- let.lab} else{vars.lab <-dplyr::full_join(vars.lab,let.lab,join_by(SEQN,Year))}
+}
+
+vars.lab
+
+```
+
+```{r}
+df.all <- vars.lab
+
+df.all <- df.all %>%
+  mutate(
+    # average systolic
+    BPXSY = rowMeans(select(., BPXSY1, BPXSY2, BPXSY3), na.rm = TRUE),
+    # average diastolic
+    BPXDI = rowMeans(select(., BPXDI1, BPXDI2, BPXDI3), na.rm = TRUE)
+  ) %>%
+  mutate(
+    BPXSY = ifelse(is.nan(BPXSY), NA_real_, BPXSY),
+    BPXDI = ifelse(is.nan(BPXDI), NA_real_, BPXDI)
+  ) %>%
+  # drop the raw readings
+  select(-BPXSY1, -BPXSY2, -BPXSY3, -BPXDI1, -BPXDI2, -BPXDI3)
+```
+
+
+```{r}
+df.all %>% names()
+
+sort(names(df.all)[grepl("\\.x|\\.y",names(df.all))])
+
+df.all %>% group_by(SEQN) %>% mutate(LBDINSI = mean(c(LBDINSI.x,LBDINSI.y),na.rm=TRUE)) %>% select(SEQN,LBDINSI,LBDINSI.x,LBDINSI.y) %>% select(-c(LBDINSI.x,LBDINSI.y))
+
+df.all %>% group_by(SEQN) %>% mutate(LBXIN = mean(c(LBXIN.x,LBXIN.y),na.rm=TRUE)) %>% select(SEQN,LBXIN,LBXIN.x,LBXIN.y) %>% select(-c(LBXIN.x,LBXIN.y))
+
+df.all %>% group_by(SEQN) %>% mutate(PHAFSTHR = mean(c(PHAFSTHR.x,PHAFSTHR.y,PHAFSTHR.x.x,PHAFSTHR.y.y),na.rm=TRUE)) %>% select(SEQN,PHAFSTHR,PHAFSTHR.x,PHAFSTHR.y,PHAFSTHR.x.x,PHAFSTHR.y.y) %>% select(-c(PHAFSTHR.x,PHAFSTHR.y,PHAFSTHR.x.x,PHAFSTHR.y.y))
+
+df.all %>% group_by(SEQN) %>% mutate(PHAFSTMN = mean(c(PHAFSTMN.x,PHAFSTMN.y,PHAFSTMN.x.x,PHAFSTMN.y.y),na.rm=TRUE)) %>% select(SEQN,PHAFSTMN,PHAFSTMN.x,PHAFSTMN.y,PHAFSTMN.x.x,PHAFSTMN.y.y) %>% select(-c(PHAFSTMN.x,PHAFSTMN.y,PHAFSTMN.x.x,PHAFSTMN.y.y))
+
+df.all %>% group_by(SEQN) %>% mutate(WTSAF2YR = mean(c(WTSAF2YR.x,WTSAF2YR.y),na.rm=TRUE)) %>% select(SEQN,WTSAF2YR,WTSAF2YR.x,WTSAF2YR.y) %>% select(-c(WTSAF2YR.x,WTSAF2YR.y))
+
+df.all <- df.all %>% 
+  group_by(SEQN) %>% mutate(WTSAF2YR = mean(c(WTSAF2YR.x,WTSAF2YR.y),na.rm=TRUE)) %>% select(-c(WTSAF2YR.x,WTSAF2YR.y)) %>% 
+  group_by(SEQN) %>% mutate(PHAFSTMN = mean(c(PHAFSTMN.x,PHAFSTMN.y,PHAFSTMN.x.x,PHAFSTMN.y.y),na.rm=TRUE)) %>% select(-c(PHAFSTMN.x,PHAFSTMN.y,PHAFSTMN.x.x,PHAFSTMN.y.y)) %>% 
+  group_by(SEQN) %>% mutate(PHAFSTHR = mean(c(PHAFSTHR.x,PHAFSTHR.y,PHAFSTHR.x.x,PHAFSTHR.y.y),na.rm=TRUE)) %>% select(-c(PHAFSTHR.x,PHAFSTHR.y,PHAFSTHR.x.x,PHAFSTHR.y.y))  %>% 
+  group_by(SEQN) %>% mutate(LBDINSI = mean(c(LBDINSI.x,LBDINSI.y),na.rm=TRUE)) %>% select(-c(LBDINSI.x,LBDINSI.y)) %>% 
+  group_by(SEQN) %>% mutate(LBXIN = mean(c(LBXIN.x,LBXIN.y),na.rm=TRUE)) %>%  
+  select(-c(LBXIN.x,LBXIN.y))
+
+sort(names(df.all)[grepl("\\.x|\\.y",names(df.all))])
+
+```
+
+
+
+```{r}
+common_cols = intersect(names(df_combined), names(df.all))
+
+df_combined <- df_combined %>%
+  select(all_of(c(common_cols, 'LBXGLU','WTSAF2YR','WTMEC2YR')))#, 'WTSOG2YR', 'LBXGLT')))
+
+df_combined$WTSOG2YR <- NA
+df_combined$LBXGLT <- NA
+
+df_all <- df.all %>%
+  select(all_of(c(common_cols, 'LBXGLT', 'WTSOG2YR','WTSAF2YR', 'LBXGLU','WTMEC2YR'))) 
+
+df_full <- bind_rows(df_combined, df_all)
+```
+
+```{r}
+df_full <- df_full %>% 
+  
+  ### We are going to update everything match 2015-2016 as best we can
+  mutate(
+  ### INS adjustment
+  #### Insulin (2011 & post-2011) = 0.8868*Insulin (pre-2011) + [0.0011*Insulin (pre-2011)**2] – 0.0744.  
+  ### GLU adjustment
+  ### Y (Roche ModP 2007) = X (Roche 911 2005-2006) + 1.148, n=143, r=0.997, slope was not significant.
+  LBXGLU = if_else(Year < 2007, LBXGLU + 1.148, LBXGLU),
+  LBXGLT = if_else(Year < 2007, LBXGLT + 1.148, LBXGLT),
+  ## FPG
+  ) %>% 
+  mutate(
+  ### GLU Forward: Y (C311 2015-2016) = 1.023 (95%CI: 1.014 – 1.032) * X (C501 2013-2014) - 0.5108 (95%CI: -1.441 – 0.4197)
+  LBXGLU = if_else(Year < 2015, 1.023 * LBXGLU - 0.5108, LBXGLU  ),
+  LBXGLT = if_else(Year < 2015, 1.023 * LBXGLT - 0.5108, LBXGLT ),
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  
+  #Commented out below line:
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR), 
+  )
+```
+
+
+```{r}
+df_full <- df_full %>%
+  rename(
+    # Participant & Demographic Info
+    Age = RIDAGEYR,
+    Gender = RIAGENDR,
+
+    # Blood Pressure Examination
+    pulse = BPXPLS,
+    reg.iregg = BPXPULS,
+    SBP = BPXSY,
+    DBP = BPXDI,
+
+    # Body Measures Examination
+    Height.Stand = BMXHT,
+    Weight = BMXWT,
+    Waist.Circ = BMXWAIST,
+    Arm.Circ = BMXARMC,
+
+    # Questionnaire Data
+    BP.Ever.Told.High = BPQ020,
+    Ever.Told.Overweight = MCQ080,
+    TransfusionEver = MCQ092,
+    dm.told = DIQ010,
+    Told.Asthma = MCQ010,
+    Anemia.Treatment = MCQ053,
+
+    # Complete Blood Count (CBC) Lab Data
+    wbc = LBXWBCSI,
+    Lymph.Perc = LBXLYPCT,
+    Monocyte.perc = LBXMOPCT,
+    Seg.Neut.perc = LBXNEPCT,
+    eosin.perc = LBXEOPCT,
+    Baso.Perc = LBXBAPCT,
+    rbc = LBXRBCSI,
+    hg = LBXHGB,
+    mcv = LBXMCVSI,
+    Mean.Cell.Hemoglobin = LBXMCHSI,
+    MCHC = LBXMC,
+    RBC.Dist.Width = LBXRDW,
+    plt = LBXPLTSI,
+    mpv = LBXMPSI,
+
+    # Standard Chemistry Panel Lab Data
+    na = LBXSNASI,
+    potas = LBXSKSI,
+    chlor = LBXSCLSI,
+    bicarb = LBXSC3SI,
+    bun = LBXSBU,
+    cr = LBXSCR,
+    cal = LBXSCA,
+    tprot = LBXSTP,
+    alb = LBXSAL,
+    tbili = LBXSTB,
+    ast = LBXSASSI,
+    alt = LBXSATSI,
+    alp = LBXSAPSI,
+
+    # Diabetes Markers Lab Data
+    fpg = LBXGLU,
+    a1c = LBXGH,
+    two = LBXGLT,
+
+    # Survey Weights
+    sample.ogtt.weight = WTSOG2YR,
+    sample.fasting.weight = WTSAF2YR,
+    sample.mec.weight = WTMEC2YR
+  ) %>% select(-dm.told)
+
+```
+
+
+
+```{r}
+save(df_full,file='df_full_2025.09.24.Rda')
+```
+

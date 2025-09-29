@@ -1,0 +1,2752 @@
+---
+title: "NHANES-XGBOOST-graphs"
+author: "alanlhutchison"
+date: "2025-02-24"
+output: html_document
+---
+
+
+### In 2025.02.24 version, we're going to focus on taking input from NHANES-XGBOOST-generate-output
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+```{r Libraries, include=FALSE,echo=FALSE}
+
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+
+packages <- c(
+  "AUC",
+  "broom",
+  "broom.helpers",
+  "caret",
+  "conflicted",
+  "data.table",
+  "DataExplorer",
+  "dplyr",
+  "forcats",
+  "foreign",
+  "ggplot2",
+  "glmnet",
+  "gridExtra",
+  "gtsummary",
+  "Hmisc",
+  "naniar",
+  "nhanesA",
+  "patchwork",
+  "pROC",
+  "Publish",
+  "purrr",
+  "readr",
+  "SHAPforxgboost",
+  "stringr",
+  "survey",
+  "survival",
+  "survminer",
+  "tidymodels",
+  "tidyr",
+  "tidyverse",
+  "viridis",
+  "xgboost"
+)
+
+for (pkg in packages) {
+  # Check if the package is not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    # If not, install it from CRAN
+    install.packages(pkg)
+  }
+  # Load the package into the R session
+  library(pkg, character.only = TRUE)
+}
+
+#conflicts_prefer(dplyr::filter)
+
+conflict_prefer("rename","dplyr")
+conflict_prefer("mutate","dplyr")
+conflict_prefer("sum","base")
+conflict_prefer("mean","base")
+
+conflict_prefer("filter","dplyr")
+
+conflict_prefer_all("xgboost")
+
+```
+
+```{r Functions}
+
+rename_features_fn <- function(data_to_modify) {
+  # Ensure the input has a 'Feature' column
+  if (!"Feature" %in% names(data_to_modify)) {
+    stop("The input data frame must contain a 'Feature' column.")
+  }
+
+  data_to_modify %>%
+    mutate(Feature = str_replace_all(Feature, 'fpg', 'FPG')) %>%
+    mutate(Feature = str_replace_all(Feature, 'a1c', 'Hemoglobin A1c')) %>%
+    mutate(Feature = str_replace_all(Feature, 'tgy', 'Triglycerides')) %>%
+    mutate(Feature = str_replace_all(Feature, 'SBP', 'Systolic BP')) %>%
+    mutate(Feature = str_replace_all(Feature, 'u.alb', 'Urine Albumin')) %>%
+    mutate(Feature = str_replace_all(Feature, 'Height.Stand', 'Height')) %>%
+    mutate(Feature = str_replace_all(Feature, 'insulin', 'Insulin')) %>%
+    mutate(Feature = str_replace_all(Feature, 'Seg.Neut.perc', '% Neutrophils')) %>%
+    mutate(Feature = str_replace_all(Feature, 'u.cr', 'Urine Creatinine')) %>%
+    mutate(Feature = str_replace_all(Feature, 'Monocyte.perc', '% Monocytes')) %>%
+    mutate(Feature = str_replace_all(Feature, 'Lymph.Perc', '% Lymphocytes')) %>%
+    mutate(Feature = str_replace_all(Feature, 'Poverty.Ratio', 'Poverty Ratio')) %>%
+    mutate(Feature = str_replace_all(Feature, 'pulse', 'Pulse')) %>%
+    mutate(Feature = str_replace_all(Feature, 'wbc', 'White Blood Cell Count')) %>%
+    mutate(Feature = str_replace_all(Feature, 'choles', 'Cholesterol')) %>%
+    mutate(Feature = str_replace_all(Feature, '^Waist.Circ', 'Waist Circum.')) %>%
+    mutate(Feature = str_replace_all(Feature, '^ast', 'AST')) %>%
+    mutate(Feature = str_replace_all(Feature, '^DBP', 'Diastolic BP')) %>%
+    mutate(Feature = str_replace_all(Feature, '^ggt', 'GGT')) %>%
+    mutate(Feature = str_replace_all(Feature, '^cr', 'Creatinine')) %>%
+    mutate(Feature = str_replace_all(Feature, '^iron', 'Iron')) %>%
+    mutate(Feature = str_replace_all(Feature, '^plt', 'Platelets')) %>%
+    mutate(Feature = str_replace_all(Feature, '^Fasting.Time', 'Fasting Time')) %>%
+    mutate(Feature = str_replace_all(Feature, '^mcv', 'Mean Corp. Vol.')) %>%
+    mutate(Feature = str_replace_all(Feature, '^ldh', 'LDH')) %>%
+    mutate(Feature = str_replace_all(Feature, '^alt', 'ALT')) %>%
+    mutate(Feature = str_replace_all(Feature, 'pdm.toldNo', 'No History of Pre-DM')) %>%
+    mutate(Feature = str_replace_all(Feature, 'hg', 'Hemoglobin')) %>%
+    mutate(Feature = str_replace_all(Feature, 'tprot', 'Total Protein')) %>% 
+    mutate(Feature = str_replace_all(Feature, 'RBC.Dist.Width', 'RBC Distribution Width (%)'))
+           
+    
+  # The function will return the modified data frame
+}
+
+
+renamed_labels <- c( 'fpg' = 'Fasting Plasma Glucose',
+                                      'a1c' = 'Hemoglobin A1c',
+                                      'tgy' = 'Triglycerides',
+                                      'SBP' = 'Systolic Blood Pressure',
+                                      'sbp' = 'Systolic Blood Pressure',
+                                      'LBXLYPCT' = "% Lymphocytes",
+                                      'u.alb' = 'Urine Albumin',
+                                      'Height.Stand' = 'Height',
+                                      'insulin' = 'Insulin',
+                                      'Seg.Neut.perc' = '% Segmented Neutrophils',
+                                      'u.cr' = 'Urine Creatinine',
+                                      'Lymph.Perc' = '% Lymphocytes',
+                                      'Poverty.Ratio' = 'Poverty Ratio',
+                                      'PovertyRatio' = 'Poverty Ratio',                     
+                                      'pulse' = 'Pulse',
+                                      'wbc' = 'White Blood Cell Count',
+                                      'choles' = 'Cholesterol',
+                                      'Waist.Circ' = 'Waist Circumference',
+                                      'ast' = 'AST',
+                                      'DBP' = 'Diastolic Blood Pressure',
+                                      'dbp' = 'Diastolic Blood Pressure',                     
+                                      'ggt' = 'GGT',
+                                      'cr' = 'Creatinine',
+                                      'iron' = 'Iron',
+                                      'plt' = 'Platelets',
+                                      'Fasting.Time' = 'Fasting Time',
+                                      'mcv' = 'Mean Corp. Volume',
+                                      'alt'= 'ALT',
+                                      'ldh' = 'LDH',
+                                      'pdm.toldNo' = "No History of Pre-DM",
+                                      'hg'= "Hemoglobin",
+                                      'tprot'="Total Protein",
+                                      'RBC.Dist.Width' = 'RBC Distribution Width (%)',
+                                      'Arm.Circ' = 'Arm Circumference (cm)',
+                                      'Monocyte.perc' = '% Monocytes',
+                                      'Mean.Cell.Hemoglobin' = 'Mean Cellular Hemoglobin'
+                    )
+```
+
+
+
+
+```{r Load files, name output files}
+
+
+dir.string <-""
+date.string <- "2025.09.25-Binary"
+filter.string <- "all"
+
+suffix <- ""
+
+
+
+
+# filter.string <- "alb<4.1"
+# filter.string <- "Cr>1"
+#filter.string <- "FIB4>2"
+# filter.string <- "FIB4>1.3"
+# filter.string <- "Age>50"
+# filter.string <- "BMI>25"
+# filter.string <- "BMI>30"
+# filter.string <- "BMI>35"
+# filter.string <- "SBP>130"
+# filter.string <- "ggt>40"
+# filter.string <- "WC>100"
+# filter.string <- "WC>110"
+
+
+### Load office_train
+load(paste0(dir.string,"NHANES-office-train-layered_",filter.string,"_",date.string,suffix,".Rda"))
+
+### Load office_test
+load(paste0(dir.string,"NHANES-office-test-layered_",filter.string,"_",date.string,suffix,".Rda"))
+
+### Load office_ext
+load(paste0(dir.string,"NHANES-office-ext-layered_",filter.string,"_",date.string,suffix,".Rda"))
+
+
+### Load xgb_models
+load(paste0(dir.string,"NHANES-All-xgb.models_",filter.string,"_",date.string,suffix,".Rda"))
+
+### Load prepared data "prepped"
+load(paste0(dir.string,"NHANES-All-prepped.data_",filter.string,"_",date.string,suffix,".Rda"))
+
+
+### Load office_test
+load(paste0(dir.string,"NHANES-office-test-layered_",filter.string,"_",date.string,suffix,".Rda"))
+
+
+
+
+common_cols <- intersect(colnames(office_train), colnames(office_test))
+df.small <- rbind(
+  subset(office_train, select = common_cols), 
+  subset(office_test, select = common_cols)
+)
+
+### OUTPUT FILES
+file.ROCs=paste0(dir.string,"NHANES-",filter.string,"_",date.string,suffix,"-All_ROCs.bmp" )
+file.importance.plots = paste0(dir.string,"NHANES-",filter.string,"_",date.string,suffix,"-ImportancePlots.bmp" )
+file.dca.all = paste0(dir.string,"NHANES-",filter.string,"_",date.string,suffix,"-DCA-all.bmp" )
+file.dca.fib4 = paste0(dir.string,"NHANES",filter.string,"_",date.string,suffix,"-DCA_FIB4.bmp" )
+
+file.dca.min = paste0(dir.string,"NHANES-",filter.string,"_",date.string,suffix,"-DCA_min-set.bmp" )
+
+
+#xgb_tuned.full <- load(file.xgb_tuned.full)
+
+```
+
+
+```{r}
+
+df.small.resampled <- df.small[sample(1:nrow(df.small),100000,prob = df.small$sample.ogtt.weight/sum(df.small$sample.ogtt.weight),replace=TRUE ),]
+
+df.small.resampled %>% filter(a1c>=6.5 & fpg >= 126 & two>=200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c>=6.5 & fpg < 126 & two>=200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c>=6.5 & fpg >= 126 & two<200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c>=6.5 & fpg < 126 & two<200) %>% nrow() / nrow(df.small.resampled)
+
+
+df.small.resampled %>% filter(a1c<6.5 & fpg >= 126 & two>=200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c<6.5 & fpg < 126 & two>=200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c<6.5 & fpg >= 126 & two<200) %>% nrow() / nrow(df.small.resampled)
+df.small.resampled %>% filter(a1c<6.5 & fpg < 126 & two<200) %>% nrow() / nrow(df.small.resampled)
+
+### A1c >= 6.5
+########### FPG >= 126.  FPG< 126
+# two >= 200.  1.07        0.08
+# two <  200.  0.10        0.14
+
+### A1c < 6.5
+########### FPG >= 126.  FPG< 126
+# two >= 200.  0.80       1.34
+# two <  200.  1.94       94.54
+
+
+```
+
+
+
+
+
+```{r Describe diagnostic ability of the A1c, FPG, OGTT}
+
+print('Of those with A1c ≥ 6.5')
+paste("Diabetes Dx by Both:", df.small %>% filter(a1c>=6.5 & fpg >= 126 & two>=200) %>% nrow()  ) 
+paste("Diabetes Dx by OGTT:", df.small %>% filter(a1c>=6.5 & two>=200 & fpg < 126) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c:", df.small %>% filter(a1c>=6.5) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.small %>% filter(a1c>=6.5 & two < 200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.small %>% filter(a1c<6.5 & two >= 200) %>% nrow() / 1 ) 
+
+print('')
+paste("Pre-Diabetes Dx by Both:", df.small %>% filter((a1c>=5.7 & a1c<6.5 )& (two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT:", df.small %>% filter((two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c:", df.small %>% filter((a1c>=5.7 & a1c<6.5 )) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c not OGTT:", df.small %>% filter((a1c>=5.7 & a1c<6.5 ) & two < 140) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT not A1c:", df.small %>% filter(a1c<5.7 & (two<200 & two>=140)) %>% nrow() / 1 ) 
+
+print('')
+paste("No Pre-Diabetes or Diabetes:", df.small %>% filter(a1c<5.7 & two < 140 ) %>% nrow() / 1 ) 
+
+print('')
+print('')
+print('')
+print('')
+print('Of those with A1c < 6.5')
+paste("Diabetes Dx by Both:", df.small %>% filter(a1c<6.5) %>%  filter(fpg>=126 & two>=200) %>% nrow()  ) 
+paste("Diabetes Dx by OGTT:", df.small %>% filter(a1c<6.5)%>% filter(two>=200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT:", df.small %>% filter(a1c<6.5)%>% filter(two>=200) %>% nrow() / df.small %>% filter(a1c<6.5) %>% nrow() ) 
+paste("Diabetes Dx by A1c:", df.small %>% filter(a1c<6.5)%>% filter(a1c>=6.5) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.small %>% filter(a1c<6.5)%>% filter(a1c>=6.5 & two < 200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.small %>% filter(a1c<6.5)%>% filter(a1c<6.5 & two >= 200) %>% nrow() / 1 ) 
+
+print('')
+paste("Pre-Diabetes Dx by Both:", df.small %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 )& (two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT:", df.small %>% filter(a1c<6.5)%>% filter((two<200 & two>=140)) %>% nrow() / df.small %>% filter(a1c<5.7) %>% nrow() ) 
+paste("Pre-Diabetes Dx by A1c:", df.small %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 )) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c not OGTT:", df.small %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 ) & two < 140) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT not A1c:", df.small %>% filter(a1c<6.5) %>% filter(a1c<5.7 & (two<200 & two>=140)) %>% nrow() / 1 ) 
+
+print('')
+paste("No Pre-Diabetes or Diabetes:", df.small %>% filter(a1c<5.7 & two < 140 ) %>% nrow() / 1 ) 
+
+
+```
+
+
+
+```{r Look at subpopulations}
+print('Age > 60')
+df.small %>% filter(Age>60,Year<2015) %>% nrow() 
+df.small %>% filter(Age>60,Year>2014) %>% nrow() 
+
+print('FIB-4 > 2.67')
+df.small %>% mutate(FIB4 = Age/plt*ast/sqrt(alt)) %>% filter(FIB4>2.67,Year<2015) %>% nrow() 
+df.small %>% mutate(FIB4 = Age/plt*ast/sqrt(alt)) %>% filter(Year>2014,FIB4>2.67) %>% nrow() 
+
+print('BMI > 30')
+df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100)  %>%  filter(BMI>30,Year<2015) %>% nrow() 
+df.small %>% mutate(BMI = Weight/(Height.Stand^2)*100*100)  %>%  filter(BMI>30,Year>2014) %>% nrow() 
+
+print('SBP > 140')
+df.small %>% filter(SBP>140,Year<2015) %>% nrow() 
+df.small %>% filter(SBP>140,Year>2014) %>% nrow() 
+
+print('eGFR < 60')
+df.small %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)
+                     )   %>% filter(eGFR < 60,Year<2015) %>% nrow()
+
+df.small %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)
+                     )   %>% filter(eGFR < 60,Year >2014) %>% nrow()
+
+
+```
+
+```{r}
+
+
+
+
+```
+
+
+
+
+
+```{r Shapley plots - Base}
+#update.packages("xgboost")
+#dim(prep[[1]])
+#xgboost::xgb.plot.shap(model=xgb_models$Full, data=prepped$Full[[1]],top_n=5)
+#xgb_models$Full$feature_names %>% length()
+#colnames(prep[[1]] )
+#xgboost::xgb.plot.shap(prepped$Full[[1]], model = xgb_models$Full, top_n=5)
+contr.full <- predict(xgb_models$Full, prepped$Full[[1]], predcontrib = TRUE)
+shap.dat.full<-xgb.plot.shap(prepped$Full[[1]], contr.full, model = xgb_models$Full, top_n = 20, n_col = 5)
+
+contr.soc <- predict(xgb_models$SOC, prepped$SOC[[1]], predcontrib = TRUE)
+shap.dat.soc<-xgb.plot.shap(prepped$SOC[[1]], contr.soc, model = xgb_models$SOC, top_n = 20, n_col = 5)
+
+contr.soc.fast <- predict(xgb_models$SOC.Fast, prepped$SOC.Fast[[1]], predcontrib = TRUE)
+shap.dat.soc.fast<-xgb.plot.shap(prepped$SOC.Fast[[1]], contr.soc.fast, model = xgb_models$SOC.Fast, top_n = 20, n_col = 5)
+
+shap.dat.soc<-xgb.plot.shap(prepped$SOC.Fast[[1]], contr.soc.fast, model = xgb_models$SOC.Fast, top_n = 20, n_col = 5)
+```
+
+
+```{r Shapley plots - GGPLOT}
+shap.dat.full.2 <- left_join(
+shap.dat.full$shap_contrib %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Shap"),
+shap.dat.full$data %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Value"),join_by(row,Feature)) %>% rename_features_fn()
+
+
+features.ordered <-shap.dat.full.2 %>% filter(row==1) %>% select(Feature) %>% pull()
+shap.dat.full.2$Feature <- factor(shap.dat.full.2$Feature,levels=features.ordered,ordered = TRUE)
+
+plt.shap.lines.full <- shap.dat.full.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ylab("SHAP Values");plot(plt.shap.lines.full)
+
+ggsave(plot=plt.shap.lines.full,filename="Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
+
+
+
+
+#xgb.ggplot.shap.summary(prepped$Full[[1]], contr, model = xgb_models$Full, top_n = 20)  # Summary plot
+
+# plt.shap.summ <- xgb.ggplot.shap.summary(data=prepped$Full[[1]], shap_contrib=contr, model = xgb_models$Full, top_n = 20) + 
+#   scale_x_discrete("Feature",labels=renamed_labels)+
+#   ylab("SHAP value") + labs(color="Feature\nvalue") + 
+#   scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ)
+# 
+# ggsave(filename="Shap-Summary.bmp",plot=plt.shap.summ)
+
+```
+
+
+```{r Shapley plots SOC}
+
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+
+shap.dat.soc.2 <- left_join(
+shap.dat.soc$shap_contrib %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Shap"),
+shap.dat.soc$data %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Value"),join_by(row,Feature)) %>% rename_features_fn()
+
+
+shap.dat.soc.fast.2 <- left_join(
+shap.dat.soc.fast$shap_contrib %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Shap"),
+shap.dat.soc.fast$data %>% data.frame() %>% mutate(row=row_number()) %>% pivot_longer(cols=!row,names_to = "Feature",values_to = "Value"),join_by(row,Feature)) %>% rename_features_fn()
+
+
+features.ordered <-shap.dat.soc.2 %>% filter(row==1) %>% select(Feature) %>% pull()
+shap.dat.soc.2$Feature <- factor(shap.dat.soc.2$Feature,levels=features.ordered,ordered = TRUE)
+
+
+#ggsave(plot=plt.shap.lines,filename="~/Dropbox/NHANES manuscript/figures/Shap-lines.bmp",width=7,height=7,units = c("in"))
+
+
+
+
+#xgb.ggplot.shap.summary(prepped$Full[[1]], contr, model = xgb_models$Full, top_n = 20)  # Summary plot
+
+plt.shap.lines.full <- shap.dat.full.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ggtitle("Full Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.full)
+
+ggsave(plot=plt.shap.lines.full,filename="Shap-lines-Full.bmp",width=7,height=7,units = c("in"))
+
+plt.shap.summ.full <- xgb.ggplot.shap.summary(prepped$Full[[1]], contr.full, model = xgb_models$Full, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels)+
+  ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("Full Model")  + theme.1 +  
+  scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.full)
+
+ggsave(plot=plt.shap.summ.full,filename="Shap-Summ-Full.bmp",width=7,height=7,units = c("in"))
+
+
+plt.shap.lines.soc <- shap.dat.soc.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") +  ggtitle("A1c+ Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.soc)
+
+ggsave(plot=plt.shap.lines.soc,filename="Shap-lines-Soc.bmp",width=7,height=7,units = c("in"))
+
+plt.shap.summ.soc <- xgb.ggplot.shap.summary(prepped$SOC[[1]], contr.soc, model = xgb_models$SOC, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels)+
+  ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("A1c+ Model")  + theme.1 + 
+  scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.soc)
+
+ggsave(plot=plt.shap.summ.soc,filename="Shap-Summ-Soc.bmp",width=7,height=7,units = c("in"))
+
+
+plt.shap.lines.soc.fast <- shap.dat.soc.fast.2 %>% ggplot(aes(x=Value,y=Shap)) + geom_point(size=0.5) + geom_smooth() + facet_wrap(~Feature,scales = "free") + ggtitle("A1c/FPG+ Model")  + theme.1 +  ylab("SHAP Values");plot(plt.shap.lines.soc.fast)
+
+ggsave(plot=plt.shap.lines.soc.fast,filename="Shap-lines-Soc.Fast.bmp",width=7,height=7,units = c("in"))
+
+
+plt.shap.summ.soc.fast <- xgb.ggplot.shap.summary(prepped$SOC.Fast[[1]], contr.soc.fast, model = xgb_models$SOC.Fast, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels)+
+  ylab("SHAP value") + labs(color="Feature\nvalue") + ggtitle("A1c/FPG+ Model")  + theme.1 + 
+  scale_color_viridis_c(limits=c(-10,10),breaks=c(-10,10),direction=-1,labels=c('Low','High')) ;plot(plt.shap.summ.soc.fast)
+
+ggsave(plot=plt.shap.summ.soc.fast,filename="Shap-Summ-Soc.Fast.bmp",width=7,height=7,units = c("in"))
+
+
+features.top20.soc.fast <-plt.shap.summ.soc.fast$data %>% group_by(feature) %>% reframe(val = abs(mean(shap_value))) %>% arrange(desc(val)) %>% pull(feature)
+
+#ggsave(filename="Shap-Summary.bmp",plot=plt.shap.summ)
+
+```
+
+
+```{r}
+
+g<-grid.arrange(ncol=1,nrow=2,
+             plt.shap.lines.full + labs(tag="A"),
+              plt.shap.summ.full + labs(tag="B")); plot(g)
+ggsave(plot=g,filename="Shap.Full.AB.bmp",width = 7,height = 7, units = "in")
+
+
+```
+
+
+
+
+
+
+
+```{r}
+features <- features.top20.soc.fast
+df.desc.stats <- df.small %>% select(features,Year) %>% mutate(Year.All = "All") %>% 
+  rename_with(~ str_replace_all(., c(
+    'fpg' = 'Fasting Plasma Glucose',
+    'a1c' = 'Hemoglobin A1c',
+    'tgy' = 'Triglycerides',
+    'sbp' = 'Systolic Blood Pressure',
+    'SBP' = 'Systolic Blood Pressure',
+    'u.alb' = 'Urine Albumin',
+    'Height.Stand' = 'Height',
+    'insulin' = 'Insulin',
+    'Seg.Neut.perc' = '% Segmented Neutrophils',
+    'u.cr' = 'Urine Creatinine',
+    'Lymph.Perc' = '% Lymphocytes',
+    'LBXLYPCT' = '% Lymphocytes',
+    'Poverty.Ratio' = 'Poverty Ratio',
+    'pulse' = 'Pulse',
+    'wbc' = 'White Blood Cell Count',
+    'choles' = 'Cholesterol',
+    '^Waist.Circ' = 'Waist Circumference',
+    'Mean.Cell.Hemoglobin' = 'Mean Cell Hemoglobin',
+    'RBC.Dist.Width' =" RBC Distribution Width",
+    'Monocyte.perc' = "% Monocytes",
+    'hg' = 'Hemoglobin',
+    'rbc' = "Red Blood Cell count",
+    '^ast' = 'AST',
+    '^alt' = 'ALT',
+    '^DBP' = 'Diastolic Blood Pressure',
+    '^dbp' = 'Diastolic Blood Pressure',
+    '^ggt' = 'GGT',
+    '^cr' = 'Creatinine',
+    '^plt' = 'Platelets',
+    '^iron' = 'Iron',
+    '^Fasting.Time'='Fasting Time',
+    '^mcv' = 'Mean Cellular Volume'
+  )))  
+
+names.stats <- names(df.desc.stats)
+names.stats <- names.stats[! names.stats %in% c('Year','Year.2015')]
+
+library(htmlTable)
+library(Gmisc)
+df.desc.stats %>% getDescriptionStatsBy(by=Year.All, names.stats,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+add_total_col = FALSE) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+            tfoot = "&dagger; mg/dL")
+
+
+df.small$Age %>% median()
+df.small$Age %>% IQR()
+df.small$Age %>% quantile(c(0.25,0.75))
+df.small$Gender %>% table() / nrow(df.small)
+df.small$Race %>% table() / nrow(df.small)
+
+
+df.small$a1c %>% sd()
+df.small$two %>% mean()
+df.small$two %>% sd()
+
+```
+
+
+
+```{r}
+
+load("NHANES-df.mo3_noogtt.Rda") # loads df.mo3
+
+features <- features.top20.soc.fast
+
+df.mo3 %>% 
+   select(features) %>% 
+  mutate(Year.Group="1999-2016,<br>No OGTT")
+df.small %>% select(features)
+
+t1 <- names( df.mo3  %>% 
+               #rename(SBP=sbp,DBP=dbp,Lymph.Perc=LBXLYPCT,Poverty.Ratio=PovertyRatio) %>%
+               select(features) %>% mutate(Year="1999-2016,<br>No OGTT") ) 
+t2 <- names( df.small %>% select(features,Year) %>% 
+                         mutate(Year = ifelse(Year > 2013,"2015-2016,<br>OGTT",ifelse(Year < 2005,"1999-2004","2005-2014,<br>OGTT"))) )
+
+
+t1[!t1 %in% t2]
+
+rbind(df.mo3  %>% 
+        #rename(SBP=sbp,DBP=dbp,Lymph.Perc=LBXLYPCT,Poverty.Ratio=PovertyRatio) %>% 
+        select(features) %>% mutate(Year="1999-2016,<br>No OGTT"),
+      df.small %>% select(features,Year) %>% 
+                         mutate(Year = ifelse(Year > 2013,"2015-2016,<br>OGTT",ifelse(Year < 2005,"1999-2004","2005-2014,<br>OGTT"))) )
+
+
+df.desc.stats <- rbind(df.mo3  %>% #rename(SBP=sbp,DBP=dbp,Lymph.Perc=LBXLYPCT,Poverty.Ratio=PovertyRatio) %>% 
+                         select(features) %>% mutate(Year.Group="1999-2016,<br>No OGTT"),
+                       df.small %>% select(features,Year) %>% 
+                         mutate(Year.Group = ifelse(Year > 2013,"2015-2016,<br>OGTT",ifelse(Year < 2005,"1999-2004","2005-2014,<br>OGTT"))) %>% select(-Year) ) %>% 
+  select(features,Year.Group) %>% rename(Year=Year.Group) %>% 
+  rename_with(~ str_replace_all(., c(
+    'fpg' = 'Fasting Plasma Glucose',
+    'a1c' = 'Hemoglobin A1c',
+    'tgy' = 'Triglycerides',
+    'sbp' = 'Systolic Blood Pressure',
+    'SBP' = 'Systolic Blood Pressure',
+    'u.alb' = 'Urine Albumin',
+    'Height.Stand' = 'Height',
+    'insulin' = 'Insulin',
+    'Seg.Neut.perc' = '% Segmented Neutrophils',
+    'u.cr' = 'Urine Creatinine',
+    'Lymph.Perc' = '% Lymphocytes',
+    'LBXLYPCT' = '% Lymphocytes',
+    'Poverty.Ratio' = 'Poverty Ratio',
+    'pulse' = 'Pulse',
+    'wbc' = 'White Blood Cell Count',
+    'choles' = 'Cholesterol',
+    '^Waist.Circ' = 'Waist Circumference',
+    'Mean.Cell.Hemoglobin' = 'Mean Cell Hemoglobin',
+    'RBC.Dist.Width' =" RBC Distribution Width",
+    'Monocyte.perc' = "% Monocytes",
+    'hg' = 'Hemoglobin',
+    'rbc' = "Red Blood Cell count",
+    '^ast' = 'AST',
+    '^alt' = 'ALT',
+    '^DBP' = 'Diastolic Blood Pressure',
+    '^dbp' = 'Diastolic Blood Pressure',
+    '^ggt' = 'GGT',
+    '^cr' = 'Creatinine',
+    '^plt' = 'Platelets',
+    '^iron' = 'Iron',
+    '^Fasting.Time'='Fasting Time',
+    '^mcv' = 'Mean Cellular Volume'
+  )))  
+
+names.stats <- names(df.desc.stats)
+names.stats <- names.stats[! names.stats %in% c('Year')]
+
+library(htmlTable)
+library(Gmisc)
+df.desc.stats %>% getDescriptionStatsBy(by=Year, names.stats,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+add_total_col = FALSE) #%>% 
+ # addHtmlTableStyle(pos.caption = "bottom") #%>% 
+  #htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+   #         tfoot = "&dagger; mg/dL")
+
+
+
+# mytheme <- gridExtra::ttheme_default(
+#     core = list(fg_params=list(cex = 0.7)),
+#     colhead = list(fg_params=list(cex = 0.5)),
+#     rowhead = list(fg_params=list(cex = 0.5)))
+# 
+# df.stats.pdm.grob <- df %>% tableGrob(theme=mytheme)
+
+
+```
+
+
+
+```{r}
+features <- features.top20.soc.fast
+df.desc.stats <-df.small %>% select(features,Year) %>% mutate(Year.2015 = ifelse(Year > 2013,"2015-2016","2005-2014")) %>% 
+  rename_with(~ str_replace_all(., c(
+    'fpg' = 'Fasting Plasma Glucose (mg/dL)',
+    'a1c' = 'Hemoglobin A1c (%)',
+    'tgy' = 'Triglycerides',
+    'SBP' = 'Systolic Blood Pressure (mmHg)',
+    'u.alb' = 'Urine Albumin',
+    'Height.Stand' = 'Height (cm)',
+    'insulin' = 'Insulin',
+    'Seg.Neut.perc' = '% Segmented Neutrophils',
+    'u.cr' = 'Urine Creatinine',
+    'Lymph.Perc' = '% Lymphocytes',
+    'Monocyte.perc' = '% Monocytes',
+    'Poverty.Ratio' = 'Poverty Ratio',
+    'pulse' = 'Pulse (bpm)',
+    'wbc' = 'White Blood Cell Count (10\U00B3/uL)',
+    'choles' = 'Cholesterol (mg/dL)',
+    '^Waist.Circ' = 'Waist Circumference (mmHg)',
+    '^ast' = 'Aspartate aminotransferase (AST) (U/L)',
+    '^DBP' = 'Diastolic Blood Pressure (mmHg)',
+    '^ggt' = 'GGT',
+    '^cr' = 'Creatinine (mg/dL)',
+    '^plt' = 'Platelets (10\U00B3/\U03BCL)',
+    '^iron' = 'Iron (\U03BCg/dL)',
+    '^alt' = 'Alanine aminotransferase (ALT) (U/L)',
+    '^hg' = 'Hemoglobin (g/dL)',
+    '^Fasting.Time'='Fasting Time (hr)',
+    '^mcv' = 'Mean Corpuscular Volume (fL)',
+    'reg.iregg' = "Regular/Irregular Heartbeat",
+    'BP.Ever.Told.High'='Ever Told Had High BP',
+    'pdm.told' = 'Ever Told Had Pre-Diabetes',
+    'Sleep.Hours'='Reported Sleep hours',
+    'dm.test.3yrs'='Have you been tested for diabetes in the past 3 years?',
+    'Ever.Told.Overweight'='Have you ever been told you were overweight?',
+    'TransfusionEver'='Have you ever received a blood transfusion?',
+    'RBC.Dist.Width' = 'Red Blood Cell Distribution Width (%)',
+    'Arm.Circ' = 'Arm Circumference (cm)',
+    'Weight' = 'Weight (kg)',
+    'Age' = 'Age (yrs)'
+  
+  )))  
+
+names.stats <- names(df.desc.stats)
+names.stats <- names.stats[! names.stats %in% c('Year','Year.2015')]
+
+library(htmlTable)
+library(Gmisc)
+df.desc.stats %>% getDescriptionStatsBy(by=Year.2015, names.stats,
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+add_total_col = FALSE) %>% 
+  addHtmlTableStyle(pos.caption = "bottom") %>% 
+  htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset")#,
+            #tfoot = "ALT: alanine aminotransferase; AST: asparate aminotransferase mg/dL")
+
+```
+
+
+
+
+```{r Diabetes statistics at population resampled level for A1c vs FPG vs OGTT}
+require(tidyr)
+df.sampled <- df.small %>% tidyr::drop_na(sample.ogtt.weight,a1c,two)  %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)
+
+paste("Diabetes Dx by Both:", df.sampled %>% filter(a1c>=6.5 | two>=200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by OGTT:", df.sampled %>% filter(two>=200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by A1c:", df.sampled %>% filter(a1c>=6.5) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c>=6.5 & two < 200) %>% nrow() / 100000 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5 & two >= 200) %>% nrow() / 100000 ) 
+
+
+print("")
+print("")
+
+
+paste("Diabetes Dx by Both:", df.sampled %>% filter(a1c>=6.5 & two>=200) %>% nrow()  ) 
+paste("Diabetes Dx by OGTT:", df.sampled %>% filter(two>=200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c:", df.sampled %>% filter(a1c>=6.5) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c>=6.5 & two < 200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5 & two >= 200) %>% nrow() / 1 ) 
+
+print('')
+paste("Pre-Diabetes Dx by Both:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 )& (two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT:", df.sampled %>% filter((two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 )) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c not OGTT:", df.sampled %>% filter((a1c>=5.7 & a1c<6.5 ) & two < 140) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<5.7 & (two<200 & two>=140)) %>% nrow() / 1 ) 
+
+print('')
+paste("No Pre-Diabetes or Diabetes:", df.sampled %>% filter(a1c<5.7 & two < 140 ) %>% nrow() / 1 ) 
+
+print('')
+print('')
+print('')
+print('')
+print('Of those with A1c < 6.5')
+paste("Diabetes Dx by Both:", df.sampled %>% filter(a1c<6.5) %>%  filter(a1c>=6.5 & two>=200) %>% nrow()  ) 
+paste("Diabetes Dx by OGTT:", df.sampled %>% filter(a1c<6.5)%>% filter(two>=200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT:", df.sampled %>% filter(a1c<6.5)%>% filter(two>=200) %>% nrow() / df.sampled %>% filter(a1c<6.5) %>% nrow() ) 
+paste("Diabetes Dx by A1c:", df.sampled %>% filter(a1c<6.5)%>% filter(a1c>=6.5) %>% nrow() / 1 ) 
+paste("Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c<6.5)%>% filter(a1c>=6.5 & two < 200) %>% nrow() / 1 ) 
+paste("Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5)%>% filter(a1c<6.5 & two >= 200) %>% nrow() / 1 ) 
+
+print('')
+paste("Pre-Diabetes Dx by Both:", df.sampled %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 )& (two<200 & two>=140)) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT:", df.sampled %>% filter(a1c<6.5)%>% filter((two<200 & two>=140)) %>% nrow() / df.sampled %>% filter(a1c<5.7) %>% nrow() ) 
+paste("Pre-Diabetes Dx by A1c:", df.sampled %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 )) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by A1c not OGTT:", df.sampled %>% filter(a1c<6.5)%>% filter((a1c>=5.7 & a1c<6.5 ) & two < 140) %>% nrow() / 1 ) 
+paste("Pre-Diabetes Dx by OGTT not A1c:", df.sampled %>% filter(a1c<6.5) %>% filter(a1c<5.7 & (two<200 & two>=140)) %>% nrow() / 1 ) 
+
+print('')
+paste("No Pre-Diabetes or Diabetes:", df.sampled %>% filter(a1c<5.7 & two < 140 ) %>% nrow() / 1 ) 
+
+
+```
+
+
+
+
+
+```{r Manuscript Figure 1}
+df.boxplot <- df.small %>% tidyr::drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<6.5 & a1c>=3.7 ) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(4.9, 7, 0.8)) )   %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% tidyr::drop_na(a1c_group)
+
+# Define the factor levels
+colors <- c(
+  "All" = "black",
+  "eGFR≥60" = "blue",
+  "eGFR<60" = "blue",
+  "Hgb≥13" = "green",
+  "Hgb<13" = "green",
+  "BMI<30" = "darkgreen",
+  "BMI≥30" = "darkgreen",
+  "FIB4≤2.67" = "red",
+  "FIB4>2.67" = "red",
+  "Age<60" = "darkorange",
+  "Age≥60" = "darkorange",
+  "SBP<140" = "purple",
+  "SBP≥140" = "purple"
+
+)
+
+levels_order <- names(colors)
+
+box.width=0.07
+plt.cohort.boxplots<-ggplot() +  
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 0.9, position = position_nudge(x = -0.6 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr<2), aes(x = a1c_group, y = two, color = factor("Cr<2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr>=2), aes(x = a1c_group, y = two, color = factor("Cr≥2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg>=13), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg<13), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(BMI < 30), aes(x = a1c_group, y = two, color = factor("BMI<30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.1 * box.width * 10), width = box.width * 0.95) +
+  geom_boxplot(data = df.boxplot %>% filter(BMI >=30), aes(x = a1c_group, y = two, color = factor("BMI≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0 * box.width * 10), width = box.width * 0.95,fill='black') + 
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 <= 2.67), aes(x = a1c_group, y = two, color = factor("FIB4≤2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.1 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 > 2.67), aes(x = a1c_group, y = two, color = factor("FIB4>2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.2 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age < 60), aes(x = a1c_group, y = two, color = factor("Age<60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.3 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age >=60), aes(x = a1c_group, y = two, color = factor("Age≥60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.4 * box.width * 10), width = box.width * 0.95,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP < 140), aes(x = a1c_group, y = two, color = factor("SBP<140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.5 * box.width * 10), width = box.width * 0.95) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP >=140), aes(x = a1c_group, y = two, color = factor("SBP≥140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.6 * box.width * 10), width = box.width * 0.95,fill='black') +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) ;print(plt.cohort.boxplots)
+
+ggsave(plot=plt.cohort.boxplots,file='Cohort-Boxplots.bmp')
+```
+
+
+```{r}
+box.width=0.07
+box.perc = 0.8
+plt.cohort.boxplots<-ggplot() +
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 0.9, position = position_nudge(x = -0.6 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr<2), aes(x = a1c_group, y = two, color = factor("Cr<2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.5 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(cr>=2), aes(x = a1c_group, y = two, color = factor("Cr≥2", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.4 * box.width * 10), width = box.width * box.perc,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg>=13), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.3 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(hg<13), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2 * box.width * 10), width = box.width * box.perc,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(BMI < 30), aes(x = a1c_group, y = two, color = factor("BMI<30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.1 * box.width * 10), width = box.width * box.perc) +
+  geom_boxplot(data = df.boxplot %>% filter(BMI >=30), aes(x = a1c_group, y = two, color = factor("BMI≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0 * box.width * 10), width = box.width * box.perc,fill='black') + 
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 <= 2.67), aes(x = a1c_group, y = two, color = factor("FIB4≤2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.1 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 > 2.67), aes(x = a1c_group, y = two, color = factor("FIB4>2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.2 * box.width * 10), width = box.width * box.perc,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age < 60), aes(x = a1c_group, y = two, color = factor("Age<60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.3 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(Age >=60), aes(x = a1c_group, y = two, color = factor("Age≥60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.4 * box.width * 10), width = box.width * box.perc,fill='black') +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP < 140), aes(x = a1c_group, y = two, color = factor("SBP<140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.5 * box.width * 10), width = box.width * box.perc) +
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP >=140), aes(x = a1c_group, y = two, color = factor("SBP≥140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.6 * box.width * 10), width = box.width * 0.95,fill='black') +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors)  ;print(plt.cohort.boxplots)
+```
+
+
+
+
+```{r}
+ggplot() +  
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter((hg>=13 & Gender=="Male") | (hg>=11 & Gender=="Female") ), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  geom_boxplot(data = df.boxplot%>% filter((hg < 13 & Gender=="Male") | (hg < 11 & Gender=="Female") ), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+```
+
+
+```{r}
+colors <- c(
+  "All" = "black",
+  "eGFR≥30" = "blue",
+  "eGFR<30" = "blue",
+  "Hgb≥13" = "green",
+  "Hgb<13" = "green",
+  "BMI<30" = "darkgreen",
+  "BMI≥30" = "darkgreen",
+  "FIB4≤2.67" = "red",
+  "FIB4>2.67" = "red",
+  "Age<60" = "darkorange",
+  "Age≥60" = "darkorange",
+  "SBP<140" = "purple",
+  "SBP≥140" = "purple"
+
+)
+levels_order <- names(colors)
+
+
+plt.cohort.1 <-ggplot() +
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  
+  geom_boxplot(data = df.boxplot %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR >= 30), aes(x = a1c_group, y = two, color = factor("eGFR≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  geom_boxplot(data = df.boxplot %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR<30), aes(x = a1c_group, y = two, color = factor("eGFR<30", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+
+
+plt.cohort.2 <- ggplot() +  
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter((hg>=13 & Gender=="Male") | (hg>=11 & Gender=="Female") ), aes(x = a1c_group, y = two, color = factor("Hgb≥13", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  geom_boxplot(data = df.boxplot%>% filter((hg < 13 & Gender=="Male") | (hg < 11 & Gender=="Female") ), aes(x = a1c_group, y = two, color = factor("Hgb<13", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+
+plt.cohort.3 <-ggplot() +  
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter(BMI < 30), aes(x = a1c_group, y = two, color = factor("BMI<30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  geom_boxplot(data = df.boxplot %>% filter(BMI >=30), aes(x = a1c_group, y = two, color = factor("BMI≥30", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors)
+
+plt.cohort.4 <-ggplot() +  
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 <= 2.67), aes(x = a1c_group, y = two, color = factor("FIB4≤2.67", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  
+  geom_boxplot(data = df.boxplot %>% filter(FIB4 > 2.67), aes(x = a1c_group, y = two, color = factor("FIB4>2.67", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors)
+
+
+plt.cohort.5 <- ggplot() +    
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter(Age < 60), aes(x = a1c_group, y = two, color = factor("Age<60", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+
+  geom_boxplot(data = df.boxplot %>% filter(Age >=60), aes(x = a1c_group, y = two, color = factor("Age≥60", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors)
+
+
+plt.cohort.6 <-ggplot() +    
+  geom_boxplot(data = df.boxplot, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.5), width = 0.1 ,fill='white')+
+  geom_boxplot(data = df.boxplot %>% filter(SBP < 140), aes(x = a1c_group, y = two, color = factor("SBP<140", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0.2), width = 0.4 )+
+  
+  geom_boxplot(data = df.boxplot %>% filter(SBP >=140), aes(x = a1c_group, y = two, color = factor("SBP≥140", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.4,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+
+plt.cohorts <- grid.arrange(ncol=2,nrow=3,plt.cohort.1,plt.cohort.2,plt.cohort.3,plt.cohort.4,plt.cohort.5, plt.cohort.6)
+
+plt.cohorts %>% ggsave(file="Cohort-6.bmp",height=10,width=7,units=c("in")); plot(plt.cohorts)
+
+```
+
+
+```{r}
+colors.2 <- c(
+  "All" = "black",
+  "eGFR≥30" = "blue",
+  "eGFR<30" = "purple"
+)
+
+df.boxplot.1 <- df.small %>% tidyr::drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<6.5 & a1c>=3.7 ) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(4.9, 7, 0.4)) )   %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% tidyr::drop_na(a1c_group)
+
+
+
+plt.egfr.only <- ggplot() +
+  geom_boxplot(data = df.boxplot.1, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.3), width = 0.4 ,fill='white')+
+  
+  geom_boxplot(data = df.boxplot.1 %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR >= 30), aes(x = a1c_group, y = two, color = factor("eGFR≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0), width = 0.2 )+
+  geom_boxplot(data = df.boxplot.1 %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR<30), aes(x = a1c_group, y = two, color = factor("eGFR<30", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.2 ), width = 0.2,fill='darkgrey')  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors.2) ; plot(plt.egfr.only )
+
+
+
+
+plt.egfr.only %>% ggsave(file="A1c-2hG-eGFR-only.bmp",height=10,width=7,units=c("in"))
+
+```
+
+
+
+```{r}
+colors.2 <- c(
+  "All" = "black",
+  "eGFR≥30 & FPG+" = "blue",
+  "eGFR<30 & FPG+" = "purple",
+  "eGFR≥30 & FPG-" = "green",
+  "eGFR<30 & FPG-" = "red"
+  
+)
+
+levels_order = names(colors.2 )
+
+df.boxplot.1 <- df.small %>% tidyr::drop_na(sample.ogtt.weight,a1c,two) %>% filter(a1c<6.5 & a1c>=3.7 ) %>% sample_n(size=100000,weight = sample.ogtt.weight,replace=TRUE)  %>% mutate(a1c_group = cut(a1c, seq(4.9, 7, 0.4)) )   %>% mutate(BMI = Weight/(Height.Stand^2)*100*100) %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% tidyr::drop_na(a1c_group) %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) 
+
+
+
+plt.egfr.only <- ggplot() +
+  geom_boxplot(data = df.boxplot.1, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.3), width = 0.4 ,fill='white')+
+  
+  geom_boxplot(data = df.boxplot.1 %>% filter(eGFR >= 30,fpg<126), aes(x = a1c_group, y = two, color = factor("eGFR≥30 & FPG-", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0), width = 0.1 )+
+  geom_boxplot(data = df.boxplot.1  %>% filter(eGFR<30,fpg<126), aes(x = a1c_group, y = two, color = factor("eGFR<30 & FPG-", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.1 ), width = 0.1,fill='darkgrey')  +
+  
+  geom_boxplot(data = df.boxplot.1  %>% filter(eGFR >= 30,fpg>=126), aes(x = a1c_group, y = two, color = factor("eGFR≥30 & FPG+", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = 0.3), width = 0.1 )+
+  geom_boxplot(data = df.boxplot.1  %>% filter(eGFR<30,fpg>=126), aes(x = a1c_group, y = two, color = factor("eGFR<30 & FPG+", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0.4 ), width = 0.1,fill='darkgrey')  +  
+
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors.2) ; plot(plt.egfr.only )
+
+
+
+```
+
+```{r}
+df.boxplot.1 %>% filter(a1c<6.5,fpg>125,eGFR>=30)
+```
+
+
+```{r A1c-2hG discoardance eGFR as dotplots}
+ggplot() +
+  geom_dotplot(data = df.boxplot.1, aes(x = a1c_group, y = two, color = factor("All", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = -0.6), width = 0.1 ,fill='white',binaxis = "y",binwidth=1/5,stackdir="center")+
+  
+  geom_dotplot(data = df.boxplot.1 %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR >= 30), aes(x = a1c_group, y = two, color = factor("eGFR≥30", levels = levels_order)), 
+               alpha = 0.1, position = position_nudge(x = -0), width = 0.4 ,binaxis = "y",binwidth=1/5,stackdir="down")+
+  geom_dotplot(data = df.boxplot.1 %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% filter(eGFR<30), aes(x = a1c_group, y = two, color = factor("eGFR<30", levels = levels_order)), 
+               alpha = 1, position = position_nudge(x = 0 ), width = 0.4,fill='darkgrey',binaxis = "y",binwidth=1/5,stackdir="up")  +
+  geom_hline(aes(yintercept = 140), color = 'red', linetype = 'dashed') +
+  geom_hline(aes(yintercept = 200), color = 'red', linetype = 'dashed') +
+  xlab('A1c Range') +
+  ylab('2-hour Glucose') +
+  labs(color = "Subset") +
+  scale_color_manual(values = colors) 
+```
+
+
+```{r}
+
+df.boxplot.1 %>% mutate(eGFR = 142 * 
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012)) %>% mutate(CKD4=eGFR<30) %>% group_by(a1c_group,CKD4) %>% dplyr::summarise(length(two)/1000)
+```
+
+
+
+```{r Full vs True comparison}
+conflicts_prefer(base::mean)
+
+ggplot(office_test) + geom_point(aes(x=two,y=Pred.Full)) +
+  geom_point(aes(x=two,y=Pred.FIB4),color='red') +  
+  geom_point(aes(x=two,y=Pred.FPG),color='green') +
+  geom_point(aes(x=two,y=Pred.Min),color='blue') +
+  geom_point(aes(x=two,y=Pred.NonFasting),color='pink') +
+  #geom_point(aes(x=two,y=Pred.Var2),color='cyan') +
+  geom_abline(aes(intercept=0,slope=1)) +
+  geom_vline(aes(xintercept=140),color='red') + 
+  geom_vline(aes(xintercept=200),color='red') + 
+  geom_hline(aes(yintercept=140),color='red') + 
+  geom_hline(aes(yintercept=200),color='red') 
+
+
+
+ggplot(office_test) + geom_point(aes(x=two,y=Pred.Full-Pred.Min)) +
+  #geom_point(aes(x=two,y=Pred.Base),color='red') +  
+  #geom_point(aes(x=two,y=Pred.SDOH),color='green') +
+  #geom_point(aes(x=two,y=Pred.Fasting),color='blue') +
+  #geom_point(aes(x=two,y=Pred.Urine.Var),color='pink') +
+  #geom_point(aes(x=two,y=Pred.Var2),color='cyan') +
+  geom_abline(aes(intercept=0,slope=0)) 
+  #geom_vline(aes(xintercept=140),color='red') + 
+  #geom_vline(aes(xintercept=200),color='red') + 
+  #geom_hline(aes(yintercept=140),color='red') + 
+  #geom_hline(aes(yintercept=200),color='red') 
+
+office_test %>% mutate(Diff = (Pred.Full-Pred.Min)*sample.ogtt.weight/sum(sample.ogtt.weight)) %>% summarise(Diff.Mean = mean(Diff),Diff.SD=sd(Diff))
+
+```
+
+
+```{r Importance Comparison}
+require(dplyr)
+df.importance <-full_join(
+    xgb.importance(feature_names = colnames(xgb_models$Full),model=xgb_models$Full) %>% select(Feature,Gain) %>% dplyr::rename(Gain.Full=Gain),
+    full_join(
+      xgb.importance(feature_names = colnames(xgb_models$FIB4),model=xgb_models$FIB4) %>% select(Feature,Gain) %>% dplyr::rename(Gain.FIB4=Gain),
+      full_join(
+        xgb.importance(feature_names = colnames(xgb_models$NonFasting),model=xgb_models$NonFasting) %>% select(Feature,Gain) %>% dplyr::rename(Gain.NonFasting=Gain),
+        full_join(
+          xgb.importance(feature_names = colnames(xgb_models$FPG),model=xgb_models$FPG) %>% select(Feature,Gain) %>% dplyr::rename(Gain.FPG=Gain),
+                  xgb.importance(feature_names = colnames(xgb_models$MIN),model=xgb_models$MIN) %>% select(Feature,Gain) %>% dplyr::rename(Gain.Min=Gain)                       
+                  ,join_by(Feature))
+            ,join_by(Feature))
+      ,join_by(Feature))
+    ,join_by(Feature))
+      
+
+
+
+Var.Clinic.2 = c("Age","GenderFemale","GenderMale","pulse","SBP","DBP","Height.Stand","Weight","Waist.Circ","Arm.Circ",
+                 "reg.ireggRegular", "reg.ireggIrregular")
+Var.Hx.2 = c("BP.Ever.Told.HighYes","BP.Ever.Told.HighNo","BP.Ever.Told.HighDon't know",
+             "pdm.toldYes","pdm.toldNo","pdm.toldDon't know","pdm.toldRefused",
+             "Sleep.Hours",
+             "dm.test.3yrsYes","dm.test.3yrsNo","dm.test.3yrsRefused","dm.test.3yrsDon't know",
+             "Ever.Told.OverweightYes","Ever.Told.OverweightNo","Ever.Told.OverweightDon't know","Ever.Told.OverweightRefused",
+             "TransfusionEverYes","TransfusionEverNo","TransfusionEverDon't know",
+             "Sleep.Ever.Told.PoorYes","Sleep.Ever.Told.PoorNo","Sleep.Ever.Told.PoorDon't know",
+             "dm.toldYes","dm.toldNo","dm.toldBorderline","dm.toldDon't know",
+             "dm.told.everYes","dm.told.everNo","dm.told.everDon't know","dm.told.everRefused",
+             "relative.asthmaYes","relative.asthmaNo","relative.asthmaDon't know","relative.asthmaRefused",
+             "Told.AsthmaYes","Told.AsthmaNo","Told.AsthmaDon't know",
+             "Anemia.TreatmentYes","Anemia.TreatmentNo","Anemia.TreatmentDon't know") 
+
+Var.CBC.2 = c("Seg.Neut.perc","Lymph.Perc","mcv","Monocyte.perc","eosin.perc","plt","Mean.Cell.Hemoglobin","mpv","rbc","hg","MCHC","Baso.Perc","wbc","RBC.Dist.Width")
+
+Var.CMP.2 = c("na","potas","chlor","bicarb","bun","cr","cal","tprot","tbili","alb","ast","alt","alp","a1c")
+
+
+Var.Urine.2 = c("u.alb", "u.cr")
+Var.Other.1.2 = c("ggt","phos","choles","HepB.cAbNegative",
+                  "HepB.sAbPositive","HepB.sAbNegative",
+                  "HepB.cAbPositive")
+Var.Other.2.2 = c("urica","Hydroxycontine","Hydrocontine",
+                  "Hep.APositive","Hep.ANegative","Hep.AIndeterminate",
+                  "Osmolality","Globulin","ldh")
+Var.SDOH.2 = c("Poverty.Ratio",
+               "RaceEthNon-Hispanic Black","RaceEthOther Hispanic","RaceEthNon-Hispanic White","RaceEthMexican American","RaceEthOther Race - Including Multi-Racial",
+               "Num.People.Household",
+               "Marriage.StatusMarried","Marriage.StatusWidowed","Marriage.StatusLiving with partner","Marriage.StatusDivorced","Marriage.StatusSeparated","Marriage.StatusNever married","Marriage.StatusRefused","Marriage.StatusDon't know", 
+               "LANG",
+               "CitizenStatusCitizen by birth or naturalization","CitizenStatusNot a citizen of the US","CitizenStatusDon't know","CitizenStatusRefused",
+               "EduLevelCollege Graduate or above","EduLevelSome College or AA degree","EduLevelHigh School Grad/GED or Equivalent","EduLevelHigh School Grad/GED or equivalent","EduLevel9-11th Grade (Includes 12th grade with no diploma)","EduLevelLess Than 9th Grade","EduLevelRefused","EduLevelDon't know") 
+
+
+Var.fasting.2 = c('fpg','tgy','insulin',"iron")
+
+
+Var.Other.3.2 = c("u.alb", "u.cr","choles","ggt","phos",
+                  "HepB.cAbNegative",
+                  "HepB.sAbPositive","HepB.sAbNegative",
+                  "HepB.cAbPositive")
+
+
+Var.MIN <- c()
+
+### BASE: Clinic + Hx CBC + CMP + Hx
+### + SDOH
+### + Fasting
+### + Urine + Var.Other.1
+### + Var.Other.2
+
+var.vector <- c(rep("Clinic",length(Var.Clinic.2)),
+                rep("History",length(Var.Hx.2)), ### excluding Ever.Told.OverweightRefused,dm.told.ever$Refused
+                rep("CBC",length(Var.CBC.2)),
+                rep("CMP",length(Var.CMP.2)),
+                rep("SDOH History",length(Var.SDOH.2)),
+                rep("Fasting Labs",length(Var.fasting.2)),
+                rep("Urine",length(Var.Urine.2)),
+                rep("Various Labs #1",length(Var.Other.1.2)),
+                rep("Various Labs #2",length(Var.Other.2.2))  )
+
+var.features <- c(Var.Clinic.2,
+                  Var.Hx.2,
+                  Var.CBC.2,
+                  Var.CMP.2,
+                  Var.SDOH.2,
+                  Var.fasting.2,
+                  Var.Urine.2,
+                  Var.Other.1.2,
+                  Var.Other.2.2)
+
+lookup_df <- data.frame(X=var.vector,Y=var.features)
+#df.importance$Feature[!df.importance$Feature %in% var.features]
+
+var.features.2<-var.features[var.features %in% df.importance$Feature]
+### STUCK HERE 11.22.2024
+
+df.importance %>% left_join(lookup_df,by=c("Feature"="Y")) %>% dplyr::rename(Type=X) %>% relocate(Feature,Type) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% pivot_longer(names_to = 'Model',cols=c(Gain.FPG,Gain.FIB4,Gain.NonFasting,Gain.Min,Gain.Full))
+
+
+df.importance %>% left_join(lookup_df,by=c("Feature"="Y")) %>% dplyr::rename(Type=X) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% pivot_longer(names_to = 'Model',cols=c(Gain.FPG,Gain.FIB4,Gain.NonFasting,Gain.Min,Gain.Full)) %>% ggplot() + geom_tile(aes(x=Model,y=Feature,fill=-log10(value)))
+
+df.importance  %>% left_join(lookup_df,by=c("Feature"="Y")) %>% dplyr::rename(Type=X) %>% mutate(Feature=factor(Feature,levels=var.features.2)) %>% arrange(Feature)  %>% mutate(across(where(is.numeric), round, 5)) %>% write.csv(file="~/Documents/NHANES15-16/Model-Importance_2025.02.25.csv",row.names = FALSE)
+```
+
+
+
+
+
+```{r}
+
+
+office_test %>% ggplot()+ geom_histogram(aes(x=Pred.SOC,fill=as.factor(DM)))
+
+
+
+#office_test %>% ggplot()+ geom_histogram(aes(x=Pred.SOC.Fast))
+
+
+```
+
+
+```{r}
+library(probably)
+#office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_windowed(DM,Pred.Full) %>% ggsave(filename="~/Dropbox/NHANES manuscript/figures/Binary-Calibration.bmp")
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_breaks(truth=DM,estimate=Pred.SOC,num_breaks=5) + theme_grey()
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_windowed(truth=DM,estimate=Pred.SOC,window_size=0.2) + theme_grey()
+
+calculate_brier_score <- function(predicted_probs, true_labels) {
+  mean((predicted_probs - true_labels)^2, na.rm = TRUE)
+}
+
+calculate_brier_score(office_test$Pred.SOC,office_test$DM==TRUE)
+calculate_brier_score(office_test$Pred.SOC.Fast,office_test$DM==TRUE)
+
+
+office_test %>% ggplot() + geom_point(aes(x=Pred.SOC,y=Pred.SOC.Fast,color=DM),alpha=0.7)
+
+val.prob.out <- rms::val.prob(office_test$Pred.SOC.Fast,office_test$DM==TRUE,g=10,logistic.cal=FALSE,smooth=FALSE) 
+rms::val.prob(office_test$Pred.SOC,office_test$DM==TRUE,g=20)
+rms::val.prob(office_test$Pred.FIB4,office_test$DM==TRUE,g=20)
+
+
+office_test %>% arrange(Pred.SOC.Fast) %>% mutate(sum=cumsum(DM)/sum(DM)) %>% select(Pred.SOC.Fast,sum) %>% ggplot() + geom_line(aes(x=Pred.SOC.Fast,sum))
+
+val.prob.out
+```
+```{r}
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_breaks(truth=DM,estimate=Pred.SOC,num_breaks=5) + theme_grey()
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_windowed(truth=DM,estimate=Pred.SOC,window_size=0.2) + theme_grey()
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_breaks(truth=DM,estimate=Pred.SOC.Fast,num_breaks=5) + theme_grey()
+office_test %>% mutate(DM=DM==TRUE) %>% cal_plot_windowed(truth=DM,estimate=Pred.SOC.Fast,window_size=0.2) + theme_grey()
+
+
+```
+
+```{r}
+
+```
+
+
+
+```{r}
+
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+
+
+plt.calibration.quantile <- office_test %>% mutate(bin=cut_number(Pred.SOC.Fast, n = 10)) %>% group_by(bin) %>% reframe(med=median(Pred.SOC.Fast),freq=sum(DM==TRUE)/sum(!is.na(DM))) %>% ggplot() + geom_point(aes(x=med,y=freq)) + geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed") +  geom_rug(data=office_test,aes(x=Pred.SOC.Fast,y=as.integer(DM)),alpha=0.6) + xlab("Median of Probaility Quantile") + ylab("Frequency of Diabetes Diagnosis") + xlim(0,1) + ylim(0,1) + ggtitle("Frequency of Diagnosis by Quantile for SOC-Fasting Model") + theme.1; plot(plt.calibration.quantile)
+
+ggsave(plt.calibration.quantile,file="Quantile-calibration-Pred.SOC.Fasting.bmp")
+
+
+
+```
+
+
+
+
+```{r Calibration subplots}
+
+conflicts_prefer(stats::cor)
+
+plt.01.line <- geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")
+ot2 <- office_test %>% mutate(quantile=cut_number(a1c,5))
+ot <- ot2 %>% filter(Age >= 60) 
+cor.1 <- cor(ot$two,ot$Pred.Min)^2
+plt.calibration.cohort.age <-ot %>% 
+  ggplot()+ 
+  geom_point(data=ot ,aes(x=Pred.Min,y=two,color=factor(quantile)),alpha=0.7) + 
+  annotate("text",x=400,y=120,label=paste0("R^2 == ",round(cor.1,2)),parse=TRUE) + 
+  #geom_point(data=office_test %>% filter(a1c < 4.5 ),aes(x=Pred.Min,y=two,color=a1c),color='yellow',alpha=0.7) +  
+  geom_line(data=data.frame(x=c(30,550),y=c(30,550)),aes(x=x,y=y),linetype="dashed")+ xlim(c(30,550)) + ylim(c(30,550)) + scale_color_viridis_d(name='Hemoglobin\nA1c (%)',direction=-1)+ ggtitle("Age ≥ 60 years") +
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose");plot(plt.calibration.cohort.age)
+
+ot <- ot2 %>% mutate(FIB4=ast/sqrt(alt)*Age/plt) %>% filter(FIB4 > 2.67)
+cor.1 <- cor(ot$two,ot$Pred.Min)^2
+plt.calibration.cohort.fib4 <-ot %>% 
+  ggplot()+ 
+  geom_point(data=ot %>% filter(a1c>=6.5),aes(x=Pred.Min,y=two),alpha=0.7,color='black') + 
+  geom_point(data=ot,aes(x=Pred.Min,y=two,color=,color=factor(quantile)),alpha=0.7) +  
+  annotate("text",x=400,y=120,label=paste0("R^2 == ",round(cor.1,2)),parse=TRUE) + 
+  #geom_point(data=office_test %>% filter(a1c < 4.5 ),aes(x=Pred.Min,y=two,color=a1c),color='yellow',alpha=0.7) +  
+  geom_line(data=data.frame(x=c(30,550),y=c(30,550)),aes(x=x,y=y),linetype="dashed")+ xlim(c(30,550)) + ylim(c(30,550)) + scale_color_viridis_d(name='Hemoglobin\nA1c (%)',direction=-1) + ggtitle("FIB-4 > 2.67") +
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose");plot(plt.calibration.cohort.fib4)
+
+
+ot <- ot2 %>%  filter(Weight^2/Height.Stand >= 30)  
+cor.1 <- cor(ot$two,ot$Pred.Min)^2
+plt.calibration.cohort.bmi <-ot %>% 
+  ggplot()+ 
+  geom_point(data=ot ,aes(x=Pred.Min,y=two,color=,color=factor(quantile)),alpha=0.7) +  
+  annotate("text",x=400,y=120,label=paste0("R^2 == ",round(cor.1,2)),parse=TRUE) + 
+  #geom_point(data=office_test %>% filter(a1c < 4.5 ),aes(x=Pred.Min,y=two,color=a1c),color='yellow',alpha=0.7) +  
+  geom_line(data=data.frame(x=c(30,550),y=c(30,550)),aes(x=x,y=y),linetype="dashed")+ xlim(c(30,550)) + ylim(c(30,550)) + scale_color_viridis_d(name='Hemoglobin\nA1c (%)',direction=-1) + ggtitle(expression("BMI ≥ 30 kg/m^2")) +
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose");plot(plt.calibration.cohort.bmi)
+
+
+ot <- ot2 %>% mutate(.,eGFR = 142 *
+                       pmin(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^ifelse(Gender=="Male",-0.302,-0.241) *
+                       pmax(cr/ifelse(Gender=="Male",0.9,0.7),1,na.rm=TRUE ) ^-1.20 *
+                       0.9938 ^ Age *
+                       ifelse(Gender=="Male",1,1.012))   %>% filter(eGFR < 60) 
+cor.1 <- cor(ot$two,ot$Pred.Min)^2
+plt.calibration.cohort.egfr <-ot %>% 
+  ggplot()+ 
+  geom_point(data=ot ,aes(x=Pred.Min,y=two,color=,color=factor(quantile)),alpha=0.7) +  
+  annotate("text",x=400,y=120,label=paste0("R^2 == ",round(cor.1,2)),parse=TRUE) + 
+  #geom_point(data=office_test %>% filter(a1c < 4.5 ),aes(x=Pred.Min,y=two,color=a1c),color='yellow',alpha=0.7) +  
+  geom_line(data=data.frame(x=c(30,550),y=c(30,550)),aes(x=x,y=y),linetype="dashed")+ xlim(c(30,550)) + ylim(c(30,550)) + scale_color_viridis_d(name='Hemoglobin\nA1c (%)',direction=-1) + ggtitle("Estimated GFR < 60 mL/min/1.73 m²") + 
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose");plot(plt.calibration.cohort.egfr )
+
+
+ot <- ot2  %>% filter(SBP > 140)  
+cor.1 <- cor(ot$two,ot$Pred.Min)^2
+plt.calibration.cohort.sbp <-ot %>% 
+  ggplot()+ 
+  geom_point(data=ot,aes(x=Pred.Min,y=two,color=,color=factor(quantile)),alpha=0.7) +  
+  annotate("text",x=400,y=120,label=paste0("R^2 == ",round(cor.1,2)),parse=TRUE) + 
+  #geom_point(data=office_test %>% filter(a1c < 4.5 ),aes(x=Pred.Min,y=two,color=a1c),color='yellow',alpha=0.7) +  
+  geom_line(data=data.frame(x=c(30,550),y=c(30,550)),aes(x=x,y=y),linetype="dashed")+ xlim(c(30,550)) + ylim(c(30,550)) + scale_color_viridis_d(name='Hemoglobin\nA1c (%)',direction=-1) + ggtitle("Systolic BP > 140 mmHg") + 
+  xlab("Predicted 2-hour Glucose") + ylab("Measured 2-hour Glucose");plot(plt.calibration.cohort.sbp )
+
+label.1 <- cowplot::get_legend(plt.calibration.cohort.age + guides(color=guide_legend(ncol=2)))
+plt.calibration.cohorts <- grid.arrange(nrow=2,ncol=3,plt.calibration.cohort.age + theme(legend.position = "none"),
+             plt.calibration.cohort.bmi+ theme(legend.position = "none"),
+             plt.calibration.cohort.fib4+ theme(legend.position = "none"),
+             plt.calibration.cohort.egfr+ theme(legend.position = "none"),
+             plt.calibration.cohort.sbp+ theme(legend.position = "none"),
+             label.1 )
+
+
+ggsave(file='Calibration_cohorts.bmp',plot=plt.calibration.cohorts)
+
+
+```
+
+
+
+
+
+
+
+```{r Making Stats 1}
+
+
+
+
+
+# Define predictors and labels
+predictors <- list(
+  "FPG" = office_test$fpg,
+  "A1c" = office_test$a1c,
+  "FPG-A1c" = office_test$Pred.FPG,
+  "FIB4" = office_test$Pred.FIB4,
+  "NonFasting" = office_test$Pred.NonFasting,
+  "SOC" = office_test$Pred.SOC,
+  "SOC.Fast" = office_test$Pred.SOC.Fast,
+  "Min" = office_test$Pred.Min,
+  "Full" = office_test$Pred.Full
+)
+
+# Define labels
+x0.igt <- as.factor(office_test$two >= 140 & office_test$two < 200)
+x0.pphg <- as.factor(office_test$two >= 200)
+
+
+
+
+# Helper function to compute AUC metrics
+compute_auc_metrics <- function(pred, label) {
+  c(
+    AUC::auc(AUC::sensitivity(pred, label)),
+    AUC::auc(AUC::specificity(pred, label)),
+    AUC::auc(AUC::roc(pred, label))
+  )
+}
+
+# Iterate over predictors and calculate stats
+auc_results <- lapply(predictors, function(pred) {
+  c(compute_auc_metrics(pred, x0.igt), compute_auc_metrics(pred, x0.pphg))
+})
+
+# Construct the final data frame
+df.stats <- do.call(cbind, auc_results) %>% as.data.frame()
+df.stats <- round(df.stats,3)
+# Name rows and columns
+df.stats$Stat <- rep(c("Sensitivity", "Specificity", "AUROC"),2)
+df.stats$Type <- c(rep("Pre-DM",3),rep("DM",3))
+
+df.stats %>% pivot_longer(!c("Stat","Type"),names_to="Vars",values_to="Value")
+
+# Transpose and convert to data frame
+#df.stats <- as.data.frame(t(df.stats))
+
+compute_roc <- function(pred,label){
+  tidy(AUC::roc(pred,label))
+}
+
+roc_results <- lapply(predictors,function(pred){
+  cbind(compute_roc(pred,x0.igt),compute_roc(pred,x0.pphg))
+})
+
+roc_results <- do.call(rbind,roc_results) %>% as.data.frame()
+colnames(roc_results) <- c("Pre-DM|Cutoff","Pre-DM|FPR","Pre-DM|TPR","DM|Cutoff","DM|FPR","DM|TPR")
+roc_results$Type2 <-rownames(roc_results)
+roc_results$Type <- str_split_i(rownames(roc_results),"\\.",1)
+
+roc_results <- roc_results %>% pivot_longer(!c("Type","Type2"),names_to = "Stat",values_to = "Value") %>% mutate(Dx = str_split_i(Stat,"\\|",1), Stat = str_split_i(Stat,"\\|",2) ) %>% pivot_wider(id_cols = c("Type","Type2","Dx"),names_from = "Stat",values_from = "Value")
+
+```
+
+
+```{r}
+office_test %>% ggplot()+ geom_point(aes(x=a1c,y=two,color=a1c<6.5 & two > 200))
+
+office_test %>% ggplot()+ geom_point(aes(x=fpg,y=two,color=fpg<126 & two > 200))
+
+```
+
+```{r Making Stats 2}
+f.pROC.cutoff <- function(predictor.x,response.x) {pROC::coords(pROC::roc(predictor=predictor.x,response=response.x),"best",
+                                                                ret=c("threshold","specificity","sens")) }
+
+
+
+#auc(AUC::sensitivity(predictors[["A1c"]], x0.pphg))
+
+# Define predictors and labels
+predictors <- list(
+  "FPG" = office_test$fpg,
+  "A1c" = office_test$a1c,
+  "FPG-A1c" = office_test$Pred.FPG,
+  "FIB4" = office_test$Pred.FIB4,
+  "NonFasting" = office_test$Pred.NonFasting,
+  "SOC"= office_test$Pred.SOC,
+  "SOC.Fast" = office_test$Pred.SOC.Fast,
+  "Min" = office_test$Pred.Min,
+  "Full" = office_test$Pred.Full
+)
+
+# Define labels
+x0.igt <- as.factor(office_test$two >= 140 & office_test$two < 200)
+x0.pphg <- as.factor(office_test$two >= 200)
+
+pROC::roc(predictor=office_test$two,response=x0.igt) #%>% pROC::coords(.,100,input="threshold")
+
+pROC::roc(predictor=office_test$fpg,response=(x0.igt==TRUE & office_test$fpg>=100 & office_test$fpg < 126)) #%>% pROC::coords(.,100,input="threshold")
+pROC::roc(predictor=office_test$fpg,response=x0.igt) %>% pROC::coords(.,101,input="threshold")
+pROC::roc(predictor=office_test$fpg,response=x0.igt) %>% pROC::coords(.,102.5,input="threshold")
+
+
+pROC::roc(predictor=office_test$fpg,response=(x0.igt==TRUE |( office_test$fpg>=100 & office_test$fpg < 126) ))  %>% pROC::coords(.,x="best",ret=c("threshold","specificity","sens"))
+
+pROC::roc(predictor=office_test$fpg,response=(x0.pphg==TRUE | office_test$fpg>=126)) %>% pROC::coords(.,x="best",ret=c("threshold","specificity","sens"))
+
+pROC::roc(predictor=office_test$fpg,response=(x0.pphg==TRUE | office_test$fpg>=126 | office_test$a1c >=6.5)) %>% pROC::coords(.,x=100,input="threshold",ret=c("threshold","specificity","sens"))
+
+
+
+# Helper function to compute AUC metrics
+compute_auc_metrics <- function(pred, label) {
+  c(
+    #AUC::auc(AUC::sensitivity(pred, label)),
+    #AUC::auc(AUC::specificity(pred, label)),
+    AUC::auc(AUC::roc(pred, label)),
+    f.pROC.cutoff(predictor=pred,response=label)[["threshold"]],
+    f.pROC.cutoff(predictor=pred,response=label)[["specificity"]],
+    f.pROC.cutoff(predictor=pred,response=label)[["sensitivity"]]    
+  )
+}
+
+# Iterate over predictors and calculate stats
+auc_results <- lapply(predictors, function(pred) {
+  c(compute_auc_metrics(pred, x0.igt), compute_auc_metrics(pred, x0.pphg))
+})
+
+# Construct the final data frame
+df.stats <- do.call(cbind, auc_results) %>% as.data.frame()
+df.stats <- round(df.stats,3)
+# Name rows and columns
+#df.stats$Stat <- rep(c("AUC_Sensitivity", "AUC_Specificity", "AUROC","Threshold","Specificity","Sensitivity"),2)
+df.stats$Stat <- rep(c( "AUROC","Threshold","Specificity","Sensitivity"),2)
+
+df.stats$Type <- c(rep("Pre-DM",4),rep("DM",4))
+
+df.stats %>% pivot_longer(!c("Stat","Type"),names_to="Vars",values_to="Value")
+
+# Transpose and convert to data frame
+#df.stats <- as.data.frame(t(df.stats))
+```
+
+```{r}
+test.char.fixed<- rbind(
+c("Type"="Pre-DM","Vars"="FPG.Fixed","AUROC"=NA,pROC::roc(predictor=office_test$fpg,response=(x0.igt)) %>% 
+            pROC::coords(.,x=100,input="threshold",ret=c("threshold","specificity","sensitivity")) ),
+c("Type"="DM","Vars"="FPG.Fixed","AUROC"=NA,pROC::roc(predictor=office_test$fpg,response=(x0.pphg)) %>% 
+            pROC::coords(.,x=126,input="threshold",ret=c("threshold","specificity","sensitivity")) ),
+
+c("Type"="Pre-DM","Vars"="A1c.Fixed","AUROC"=NA,pROC::roc(predictor=office_test$a1c,response=(x0.igt)) %>% 
+            pROC::coords(.,x=5.7,input="threshold",ret=c("threshold","specificity","sensitivity"))),
+c("Type"="DM","Vars"="A1c.Fixed","AUROC"=NA,pROC::roc(predictor=office_test$a1c,response=(x0.pphg)) %>% 
+            pROC::coords(.,x=6.5,input="threshold",ret=c("threshold","specificity","sensitivity")))
+) %>% as.data.frame() %>% mutate_all(~ as.character(.)) %>% pivot_longer(cols=!c("Type","Vars"),values_to = "Value",names_to ="Stat") %>% mutate(Value=round(as.numeric(Value),2)) %>% 
+  mutate(Stat=if_else(Stat=="sensitivity","Sensitivity",
+                      if_else(Stat=="specificity","Specificity",
+                              if_else(Stat=="threshold","Threshold",Stat))))
+```
+
+
+
+```{r Making Stats 2.2}
+f.pROC.cutoff <- function(predictor.x,response.x) {pROC::coords(pROC::roc(predictor=predictor.x,response=response.x),"best",
+                                                                ret=c("threshold","specificity","sens")) }
+
+
+
+#auc(AUC::sensitivity(predictors[["A1c"]], x0.pphg))
+
+# Define predictors and labels
+predictors <- list(
+  "FPG" = office_test$fpg,
+  "A1c" = office_test$a1c,
+  "FPG-A1c" = office_test$Pred.FPG,
+  "FIB4" = office_test$Pred.FIB4,
+  "NonFasting" = office_test$Pred.NonFasting,
+  "SOC"= office_test$Pred.SOC,
+  "SOC_Fast" = office_test$Pred.SOC.Fast,
+  "Min" = office_test$Pred.Min,
+  "Full" = office_test$Pred.Full
+)
+
+# Define labels
+x0.igt <- as.factor( (office_test$two >= 140 & office_test$two < 200) | 
+                       (office_test$fpg >=100 & office_test$fpg<126 ) | 
+                       (office_test$a1c>=5.7 & office_test$a1c<6.5  ) )
+
+x0.pphg <- as.factor(office_test$two >= 200 | office_test$a1c >=6.5 | office_test$fpg >=126)
+
+
+
+
+# Helper function to compute AUC metrics
+compute_auc_metrics <- function(pred, label) {
+  c(
+    #AUC::auc(AUC::sensitivity(pred, label)),
+    #AUC::auc(AUC::specificity(pred, label)),
+    AUC::auc(AUC::roc(pred, label)),
+    f.pROC.cutoff(predictor=pred,response=label)[["threshold"]],
+    f.pROC.cutoff(predictor=pred,response=label)[["specificity"]],
+    f.pROC.cutoff(predictor=pred,response=label)[["sensitivity"]]    
+  )
+}
+
+# Iterate over predictors and calculate stats
+auc_results <- lapply(predictors, function(pred) {
+  c(compute_auc_metrics(pred, x0.igt), compute_auc_metrics(pred, x0.pphg))
+})
+
+# Construct the final data frame
+df.stats <- do.call(cbind, auc_results) %>% as.data.frame()
+df.stats <- round(df.stats,2)
+# Name rows and columns
+#df.stats$Stat <- rep(c("AUC_Sensitivity", "AUC_Specificity", "AUROC","Threshold","Specificity","Sensitivity"),2)
+df.stats$Stat <- rep(c( "AUROC","Threshold","Specificity","Sensitivity"),2)
+
+df.stats$Type <- c(rep("Pre-DM",4),rep("DM",4))
+df.stats
+
+df.stats.3 <- rbind(
+  df.stats %>% pivot_longer(!c("Stat","Type"),names_to="Vars",values_to="Value"),
+  test.char.fixed
+  ) %>% 
+  arrange(Stat,Type,Value)
+
+
+
+# Transpose and convert to data frame
+#df.stats <- as.data.frame(t(df.stats))
+```
+
+
+```{r}
+df.stats.3 %>% filter(Stat!="AUROC" & Stat!="Threshold")
+```
+
+
+```{r Making Stats 2.3}
+### COMPUTE ROC RESULTS
+compute_roc <- function(pred,label){
+  tidy(AUC::roc(pred,label)) ### creates df of cutoff, fpr, tpr
+}
+
+roc_results <- lapply(predictors,function(pred){
+  cbind(compute_roc(pred,x0.igt),compute_roc(pred,x0.pphg))
+})
+
+roc_results <- do.call(rbind,roc_results) %>% as.data.frame()
+colnames(roc_results) <- c("Pre-DM|Cutoff","Pre-DM|FPR","Pre-DM|TPR","DM|Cutoff","DM|FPR","DM|TPR")
+roc_results$Type2 <-rownames(roc_results)
+roc_results$Type <- str_split_i(rownames(roc_results),"\\.",1)
+
+roc_results <- roc_results %>% pivot_longer(!c("Type","Type2"),names_to = "Stat",values_to = "Value") %>% mutate(Dx = str_split_i(Stat,"\\|",1), Stat = str_split_i(Stat,"\\|",2) ) %>% pivot_wider(id_cols = c("Type","Type2","Dx"),names_from = "Stat",values_from = "Value")
+
+```
+
+
+```{r}
+
+
+plt.roc.results <- roc_results %>% select(-Type2) %>% unique() %>% ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Dx)) +
+  labs(color="Model",linetype="Diagnosis") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG-A1c"="cyan","NonFasting"="magenta","FIB4"="purple","Full"="orange","Min"="red","SOC"="brown","SOC.Fast"="black"),guide="none") +
+  scale_linetype_discrete(labels=c("Diabetes","Pre-Diabetes")); print(plt.roc.results) 
+  
+
+plt.roc.results.few <- roc_results %>% filter(Type=="FPG" | Type=="A1c" | Type=="Min"|Type=="SOC"|Type=="SOC_Fast")  %>% ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Dx)) +
+  labs(color="Model",linetype="Diagnosis") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5)) + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG-A1c"="cyan","Full"="orange","Min"="red","SOC"="brown","SOC_Fast"="black"))+#,guide="none") +
+  scale_linetype_discrete(labels=c("Diabetes","Pre-Diabetes"))+ facet_wrap(~Dx); print(plt.roc.results.few) 
+  
+
+
+```
+
+
+```{r}
+x0.igt.bool <-  (office_test$two >= 140 & office_test$two < 200) | 
+                       (office_test$fpg >=100 & office_test$fpg<126 ) | 
+                       (office_test$a1c>=5.7 & office_test$a1c<6.5  ) 
+
+x0.pphg.bool <- (office_test$two >= 200 | office_test$a1c >=6.5 | office_test$fpg >=126)
+
+
+
+stringent.threshold.dm <- list(
+     TP=sum((office_test$a1c >= 6.5) ), # TPs
+     TN=sum((office_test$a1c < 6.5)==TRUE & x0.pphg.bool), # TNs
+     FN=sum((office_test$a1c < 6.5)==TRUE & x0.pphg.bool), # FN
+     FP=0 #FPs
+)
+
+
+stringent.threshold.dm$TPR <- stringent.threshold.dm$TP/(stringent.threshold.dm$TP+stringent.threshold.dm$FN)
+stringent.threshold.dm$FPR <- stringent.threshold.dm$FP/(stringent.threshold.dm$TN+stringent.threshold.dm$FP)
+stringent.threshold.dm
+
+
+stringent.threshold.pdm <- list(
+     TP=sum((office_test$a1c >= 5.7) & x0.igt.bool), # TPs
+     TN=sum((office_test$a1c < 5.7)==TRUE & x0.igt.bool), # TNs
+     FN=sum((office_test$a1c < 5.7)==TRUE & x0.igt.bool), # FN
+     FP=0 #FPs
+)
+
+stringent.threshold.pdm$TPR <- stringent.threshold.pdm$TP/(stringent.threshold.pdm$TP+stringent.threshold.pdm$FN)
+stringent.threshold.pdm$FPR <- stringent.threshold.pdm$FP/(stringent.threshold.pdm$TN+stringent.threshold.pdm$FP)
+stringent.threshold.pdm
+
+
+### FPG
+stringent.threshold.dm.fpg <- list(
+     TP=sum(office_test$fpg >= 126 ), # TPs
+     TN=sum(office_test$fpg < 126 & x0.pphg.bool ), # TNs
+     FN=sum(office_test$fpg < 126 & x0.pphg.bool ), # FN
+     FP=0 #FPs
+)
+
+
+stringent.threshold.dm.fpg$TPR <- stringent.threshold.dm.fpg$TP/(stringent.threshold.dm.fpg$TP+stringent.threshold.dm.fpg$FN)
+stringent.threshold.dm.fpg$FPR <- stringent.threshold.dm.fpg$FP/(stringent.threshold.dm.fpg$TN+stringent.threshold.dm.fpg$FP)
+stringent.threshold.dm.fpg
+
+stringent.threshold.pdm.fpg <- list(
+     TP=sum(office_test$fpg >= 100 & x0.igt.bool ), # TPs
+     TN=sum(office_test$fpg < 100 & x0.igt.bool), # TNs
+     FN=sum(office_test$fpg < 100 & x0.igt.bool), # FN
+     FP=0 #FPs
+)
+
+stringent.threshold.pdm.fpg$TPR <- stringent.threshold.pdm.fpg$TP/(stringent.threshold.pdm.fpg$TP+stringent.threshold.pdm.fpg$FN)
+stringent.threshold.pdm.fpg$FPR <- stringent.threshold.pdm.fpg$FP/(stringent.threshold.pdm.fpg$TN+stringent.threshold.pdm.fpg$FP)
+stringent.threshold.pdm.fpg
+
+
+
+
+```
+
+```{r}
+roc_results.2 <- data.frame(
+  Type = c("A1c","A1c","FPG","FPG"),
+  Type2 = c("A1c.Fixed","A1c.Fixed","FPG.Fixed","FPG.Fixed"),
+  Dx = c("Pre-DM","DM","Pre-DM","DM"),
+  Cutoff = c(5.7,6.5,100,126),
+  FPR = c(stringent.threshold.pdm$FPR,stringent.threshold.dm$FPR,stringent.threshold.pdm.fpg$FPR,stringent.threshold.dm.fpg$FPR),
+  TPR = c(stringent.threshold.pdm$TPR,stringent.threshold.dm$TPR,stringent.threshold.pdm.fpg$TPR,stringent.threshold.dm.fpg$TPR)
+)
+```
+
+
+```{r}
+
+roc_results %>% ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Dx,shape=Dx)) +
+  geom_point(data=roc_results.2,aes(x=FPR,TPR,color=Type,shape=Dx,linetype=Dx)) +
+  #xlab('False Positive Rate') + 
+  #ylab('True Positive Rate')  + 
+  #theme(plot.title = element_text(hjust = 0.5))  + 
+  #geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")  + 
+  #scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG-A1c"="cyan","NonFasting"="magenta","FIB4"="purple","Full"="orange","Min"="red")) +
+  guides(
+    linetype = guide_legend(override.aes = list(shape = c(16, 17))))
+```
+
+
+```{r}
+plt.roc.results <- 
+roc_results %>% ggplot() + 
+  geom_point(data=roc_results.2,aes(x=FPR,TPR,color=Type,shape=Dx,linetype=Dx))+
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Dx,shape=Dx)) +
+  labs(color="Model",linetype="Diagnosis",shape="Diagnosis") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5))  + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG-A1c"="cyan","NonFasting"="magenta","FIB4"="purple","Full"="orange","Min"="red")) +
+  guides(
+    linetype = guide_legend(override.aes = list(shape = c(16, 17))), # Add shapes to linetype legend
+    shape = guide_legend(override.aes = list(linetype = c(1,2))), # Remove the separate shape legend
+    color = "none") + 
+  scale_linetype_discrete(labels=c("DM","Pre-DM"))  ; print(plt.roc.results) 
+  
+
+plt.roc.results.few <- roc_results %>% filter(Type=="FPG" | Type=="A1c" | Type =="NonFasting" | Type=="Min")  %>% ggplot() +
+  geom_point(data=roc_results.2,aes(x=FPR,TPR,color=Type,shape=Dx,linetype=Dx))+
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Dx,shape=Dx)) +
+  labs(color="Model",linetype="Diagnosis",shape="Diagnosis") +
+  xlab('False Positive Rate') +
+  ylab('True Positive Rate')  +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed")  +
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG-A1c"="cyan","NonFasting"="magenta","FIB4"="purple","Full"="orange","Min"="red")) +
+  guides(
+    linetype = guide_legend(override.aes = list(shape = c(16, 17))), # Add shapes to linetype legend
+    shape = guide_legend(override.aes = list(linetype = c(1,2))), # Remove the separate shape legend
+    color = "none")+
+  scale_linetype_discrete(labels=c("DM","Pre-DM")); print(plt.roc.results.few)
+```
+
+
+```{r Rename columns of roc_results}
+roc_results.old <- roc_results
+roc_results %>% select(Type) %>% unique()
+
+roc_results <- roc_results %>% 
+  mutate(Type=if_else(Type=="FPG-A1c","FPG+A1c",Type)) %>% 
+  mutate(Type=if_else(Type=="SOC","A1c+",Type)) %>% 
+  mutate(Type=if_else(Type=="SOC_Fast","A1c/FPG+",Type)) 
+  
+  
+```
+
+
+
+```{r}
+plt.roc.results.all.dm <- 
+roc_results %>% filter(Dx=="DM") %>% 
+  rbind(data.frame(Type="Test All (B)",Type2="TA.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  rbind(data.frame(Type="Test None (B)",Type2="TN.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>%   
+  rbind(data.frame(Type="A1c.Fixed",Type2="AF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  rbind(data.frame(Type="FPG.Fixed",Type2="FF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>%   
+  
+  ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Type)) +
+  geom_point(data=roc_results.2 %>% filter(Dx=="DM"),aes(x=FPR,TPR,color=Type2))+
+  labs(color="Model",linetype="Model",shape="Model") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5))  + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dotdash")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG+A1c"="brown","NonFasting"="magenta","Full"="orange","Min"="red","A1c+"="darkblue","A1c/FPG+"="blue","Test All (B)"="black","Test None (B)"="black","FPG.Fixed"="green","A1c.Fixed"="darkgreen")) +
+    scale_linetype_manual(values=c("A1c"="longdash","FPG"="solid","FPG+A1c"="solid","NonFasting"="longdash","Full"="solid","Min"="solid","A1c+"="longdash","A1c/FPG+"="solid","Test All (B)"="dotted","Test None (B)"="dotted","A1c.Fixed"="dotted","FPG.Fixed"="dotted")) 
+ #guides(
+  #  shape = guide_legend(override.aes = list(linetype = c(1,2)))) # Remove the separate shape legend
+print(plt.roc.results.all.dm) 
+
+```
+
+```{r}
+plt.roc.results.few.dm <- 
+roc_results %>% filter(Dx=="DM") %>% filter(Type!="FPG-A1c" & Type!="NonFasting" & Type!="Min") %>% 
+  rbind(data.frame(Type="Test All (B)",Type2="TA.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  #rbind(data.frame(Type="Test None (B)",Type2="TN.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>%   
+  rbind(data.frame(Type="A1c.Fixed",Type2="AF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  rbind(data.frame(Type="FPG.Fixed",Type2="FF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>%     
+  ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Type)) +
+  geom_point(data=roc_results.2 %>% filter(Dx=="DM"),aes(x=FPR,TPR,color=Type2))+
+  labs(color="Model",linetype="Model",shape="Model") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5))  + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dotdash")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG+A1c"="brown","NonFasting"="magenta","Full"="orange","Min"="red","A1c+"="darkblue","A1c/FPG+"="blue","Test All (B)"="black","Test None (B)"="black","FPG.Fixed"="green","A1c.Fixed"="darkgreen")) +
+    scale_linetype_manual(values=c("A1c"="longdash","FPG"="solid","FPG+A1c"="solid","NonFasting"="longdash","Full"="solid","Min"="solid","A1c+"="longdash","A1c/FPG+"="solid","Test All (B)"="dotted","Test None (B)"="dotted","A1c.Fixed"="dotted","FPG.Fixed" ="dotted")) 
+ #guides(
+  #  shape = guide_legend(override.aes = list(linetype = c(1,2)))) # Remove the separate shape legend
+print(plt.roc.results.few.dm) 
+
+
+
+plt.roc.results.few.fasting.dm <- 
+roc_results %>% filter(Dx=="DM") %>% filter(Type=="FPG.Fixed" | Type=="FPG" | Type=="A1c/FPG+") %>% 
+  rbind(data.frame(Type="Test All (D)",Type2="TA.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  rbind(data.frame(Type="FPG.Fixed",Type2="FF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>%     
+  ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Type)) +
+  geom_point(data=roc_results.2 %>% filter(Dx=="DM" & Type2=="FPG.Fixed"),aes(x=FPR,TPR,color=Type2))+
+  labs(color="Model",linetype="Model",shape="Model") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5))  + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dotdash")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG+A1c"="brown","NonFasting"="magenta","Full"="orange","Min"="red","A1c+"="darkblue","A1c/FPG+"="blue","Test All (D)"="black","Test None (B)"="black","FPG.Fixed"="green","A1c.Fixed"="darkgreen")) +
+    scale_linetype_manual(values=c("A1c"="longdash","FPG"="solid","FPG+A1c"="solid","NonFasting"="longdash","Full"="solid","Min"="solid","A1c+"="longdash","A1c/FPG+"="solid","Test All (D)"="dotted","Test None (B)"="dotted","A1c.Fixed"="dotted","FPG.Fixed" ="dotted")) 
+ #guides(
+  #  shape = guide_legend(override.aes = list(linetype = c(1,2)))) # Remove the separate shape legend
+print(plt.roc.results.few.fasting.dm) 
+
+plt.roc.results.few.nonfasting.dm <- 
+roc_results %>% filter(Dx=="DM") %>% filter(Type=="A1c.Fixed" | Type=="A1c" | Type=="A1c+") %>% 
+  rbind(data.frame(Type="Test All (B)",Type2="TA.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  rbind(data.frame(Type="A1c.Fixed",Type2="AF.1",Dx="DM",Cutoff=1,FPR=0,TPR=0)) %>% 
+  ggplot() + 
+  geom_line(aes(x=FPR,y=TPR,color=Type,linetype=Type)) +
+  geom_point(data=roc_results.2 %>% filter(Dx=="DM" & Type2=="A1c.Fixed"),aes(x=FPR,TPR,color=Type2))+
+  labs(color="Model",linetype="Model",shape="Model") + 
+  xlab('False Positive Rate') + 
+  ylab('True Positive Rate')  + 
+  theme(plot.title = element_text(hjust = 0.5))  + 
+  geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dotdash")  + 
+  scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","FPG+A1c"="brown","NonFasting"="magenta","Full"="orange","Min"="red","A1c+"="darkblue","A1c/FPG+"="blue","Test All (B)"="black","Test None (B)"="black","FPG.Fixed"="green","A1c.Fixed"="darkgreen")) +
+    scale_linetype_manual(values=c("A1c"="longdash","FPG"="solid","FPG+A1c"="solid","NonFasting"="longdash","Full"="solid","Min"="solid","A1c+"="longdash","A1c/FPG+"="solid","Test All (B)"="dotted","Test None (B)"="dotted","A1c.Fixed"="dotted","FPG.Fixed" ="dotted")) 
+ #guides(
+  #  shape = guide_legend(override.aes = list(linetype = c(1,2)))) # Remove the separate shape legend
+print(plt.roc.results.few.nonfasting.dm) 
+
+```
+
+
+
+
+
+
+```{r}
+df.stats.3 %>% pivot_wider(names_from = "Vars",values_from = "Value")  %>% arrange(rev(Type),rev(Stat)) %>% relocate(Type,Stat,A1c.Fixed,A1c,FPG.Fixed,FPG,`FPG-A1c`,FIB4,NonFasting,Min,Full)
+```
+
+
+
+```{r Stats Table Full}
+
+df.stats <- df.stats.3
+  
+  
+  
+#df.stats <- df.stats %>% round(3)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(gtable)
+rownames(df.stats) <- gsub("\\.\\.\\.",' - ', rownames(df.stats) )
+df.stats
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 0.75)),
+    colhead = list(fg_params=list(cex = 0.8)),
+    rowhead = list(fg_params=list(cex = 0.8)))
+
+df.stats.table <- df.stats %>% filter(Stat=="Threshold" | Stat=="Specificity" | Stat=="Sensitivity" | Stat=="AUROC")
+
+
+df.stats.table.t <-df.stats.table %>% filter(Type=="DM") %>% select(-c(Type)) %>% pivot_wider(names_from = Stat,values_from = Value) %>% select(-c(Vars,Threshold)) %>% relocate(AUROC,Sensitivity,Specificity) %>% t() %>% as.data.frame() 
+
+names(df.stats.table.t)  <- df.stats.table %>% filter(Type=="DM") %>% pivot_wider(names_from = Stat,values_from = Value) %>% pull(Vars)
+
+dput(df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full))
+
+data_df <- df.stats.table.t %>% select(-c(FIB4,Min,NonFasting)) %>%  relocate(A1c.Fixed,A1c,SOC,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Full) %>% rename(`FPG+A1c`=`FPG-A1c`,`A1c+`=SOC,`A1c/FPG+`=SOC_Fast)
+
+
+
+# 1. Create the initial tableGrob
+tg_body <- tableGrob(data_df, theme = mytheme)
+
+# 2. Define the height for the new header row
+new_row_height <- unit(1.5, "lines")
+
+# 3. Add a new row at the top of the gtable
+tg_combined <- gtable_add_rows(tg_body, heights = new_row_height, pos = 0)
+
+# 4. Create text grobs for the combined headers
+header_font_params <- mytheme$colhead$fg_params %||% list(fontface = "bold")
+
+header_A_text <- "Non-Fasting Approaches"
+header_B_text <- "Fasting Approaches"
+
+header_A_grob <- textGrob(header_A_text, gp = do.call(gpar, header_font_params))
+header_B_grob <- textGrob(header_B_text, gp = do.call(gpar, header_font_params))
+empty_grob    <- textGrob("", gp = do.call(gpar, header_font_params))
+
+# 5. Add text grobs to the new top row
+tg_combined <- gtable_add_grob(tg_combined, empty_grob, t = 1, l = 1, b = 1, r = 1, name = "combined_header_empty")
+tg_combined <- gtable_add_grob(tg_combined, header_A_grob, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_text")
+tg_combined <- gtable_add_grob(tg_combined, header_B_grob, t = 1, l = 5, b = 1, r = 9, name = "combined_header_B_text")
+
+# 6. Add background shading
+header_bg_color <- "lightgray"
+header_A_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_A_bg, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_bg", z = 0)
+header_B_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_B_bg, t = 1, l = 5, b = 1, r = 9, name = "combined_header_B_bg", z = 0)
+
+# 7. Add a more visible dividing line, adjusted for better alignment
+divider_line_color <- "white"
+divider_line_lwd <- 8 # This is the line width parameter (roughly in points for screen)
+
+# Calculate the x-position to effectively center the line on the cell boundary.
+# We shift the line to the left from the absolute right edge (1 npc)
+# by half of its own thickness. This helps align its center with lines below.
+# Note: 'lwd' in gpar is a multiplier, but for lwd >= 1 it's often close to points on screen.
+# We use "pt" units for this offset.
+center_offset <- unit(-6+0.5 * divider_line_lwd, "pt")
+line_x_position <- unit(1, "npc") - center_offset
+
+dividing_line_grob <- segmentsGrob(
+  x0 = line_x_position, y0 = unit(0, "npc"), # Start from new x, bottom of cell
+  x1 = line_x_position, y1 = unit(1, "npc"), # End at new x, top of cell
+  gp = gpar(col = divider_line_color, lwd = divider_line_lwd)
+)
+
+tg_combined <- gtable_add_grob(tg_combined, dividing_line_grob,
+                               t = 1, l = 4, b = 1, r = 4, # Placed in the cell at the end of "Combined Header 1"
+                               name = "combined_header_divider", z = 1)
+
+# 8. Plot the modified table
+grid.newpage()
+plot(tg_combined)
+
+```
+
+
+
+```{r}
+
+
+
+```
+
+
+
+```{r Stats Table Few}
+
+df.stats <- df.stats.3
+  
+df.stats <- df.stats %>% mutate(Value=ifelse(Stat=="Specificity" & Type=="DM" & Vars=="FPG.Fixed",1,Value))  
+  
+#df.stats <- df.stats %>% round(3)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(gtable)
+rownames(df.stats) <- gsub("\\.\\.\\.",' - ', rownames(df.stats) )
+df.stats
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 1)),
+    colhead = list(fg_params=list(cex = 1)),
+    rowhead = list(fg_params=list(cex = 1)))
+
+df.stats.table <- df.stats %>% filter(Stat=="Threshold" | Stat=="Specificity" | Stat=="Sensitivity" | Stat=="AUROC")
+
+
+df.stats.table.t <-df.stats.table %>% filter(Type=="DM") %>% select(-c(Type)) %>% pivot_wider(names_from = Stat,values_from = Value) %>% select(-c(Vars,Threshold)) %>% relocate(AUROC,Sensitivity,Specificity) %>% t() %>% as.data.frame() 
+
+names(df.stats.table.t)  <- df.stats.table %>% filter(Type=="DM") %>% pivot_wider(names_from = Stat,values_from = Value) %>% pull(Vars)
+
+dput(df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full))
+
+### Here we make it smaller
+data_df <- df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full)  %>%  select(A1c.Fixed,A1c,SOC,FPG.Fixed,FPG,SOC_Fast) %>% rename(`A1c+`=SOC,`A1c/FPG+`=SOC_Fast)
+
+
+
+# 1. Create the initial tableGrob
+tg_body <- tableGrob(data_df, theme = mytheme)
+
+# 2. Define the height for the new header row
+new_row_height <- unit(1.5, "lines")
+
+# 3. Add a new row at the top of the gtable
+tg_combined <- gtable_add_rows(tg_body, heights = new_row_height, pos = 0)
+
+# 4. Create text grobs for the combined headers
+header_font_params <- mytheme$colhead$fg_params %||% list(fontface = "bold")
+
+header_A_text <- "Non-Fasting Approaches"
+header_B_text <- "Fasting Approaches"
+
+header_A_grob <- textGrob(header_A_text, gp = do.call(gpar, header_font_params))
+header_B_grob <- textGrob(header_B_text, gp = do.call(gpar, header_font_params))
+empty_grob    <- textGrob("", gp = do.call(gpar, header_font_params))
+
+# 5. Add text grobs to the new top row
+tg_combined <- gtable_add_grob(tg_combined, empty_grob, t = 1, l = 1, b = 1, r = 1, name = "combined_header_empty")
+tg_combined <- gtable_add_grob(tg_combined, header_A_grob, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_text")
+tg_combined <- gtable_add_grob(tg_combined, header_B_grob, t = 1, l = 4, b = 1, r = 7, name = "combined_header_B_text")
+
+# 6. Add background shading
+header_bg_color <- "lightgray"
+header_A_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_A_bg, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_bg", z = 0)
+header_B_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_B_bg, t = 1, l = 3, b = 1, r = 7, name = "combined_header_B_bg", z = 0)
+
+# 7. Add a more visible dividing line, adjusted for better alignment
+divider_line_color <- "white"
+divider_line_lwd <- 8 # This is the line width parameter (roughly in points for screen)
+
+# Calculate the x-position to effectively center the line on the cell boundary.
+# We shift the line to the left from the absolute right edge (1 npc)
+# by half of its own thickness. This helps align its center with lines below.
+# Note: 'lwd' in gpar is a multiplier, but for lwd >= 1 it's often close to points on screen.
+# We use "pt" units for this offset.
+center_offset <- unit(-6+0.5 * divider_line_lwd, "pt")
+line_x_position <- unit(1, "npc") - center_offset
+
+dividing_line_grob <- segmentsGrob(
+  x0 = line_x_position, y0 = unit(0, "npc"), # Start from new x, bottom of cell
+  x1 = line_x_position, y1 = unit(1, "npc"), # End at new x, top of cell
+  gp = gpar(col = divider_line_color, lwd = divider_line_lwd)
+)
+
+tg_combined.few <- gtable_add_grob(tg_combined, dividing_line_grob,
+                               t = 1, l = 4, b = 1, r = 4, # Placed in the cell at the end of "Combined Header 1"
+                               name = "combined_header_divider", z = 1)
+
+# 8. Plot the modified table
+grid.newpage()
+plot(tg_combined.few)
+
+```
+
+
+```{r Stats Table FULL}
+df.stats <- df.stats.3
+  
+df.stats <- df.stats %>% mutate(Value=ifelse(Stat=="Specificity" & Type=="DM" & Vars=="FPG.Fixed",1,Value))  
+  
+#df.stats <- df.stats %>% round(3)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(gtable)
+rownames(df.stats) <- gsub("\\.\\.\\.",' - ', rownames(df.stats) )
+df.stats
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 1)),
+    colhead = list(fg_params=list(cex = 1)),
+    rowhead = list(fg_params=list(cex = 1)))
+
+df.stats.table <- df.stats %>% filter(Stat=="Threshold" | Stat=="Specificity" | Stat=="Sensitivity" | Stat=="AUROC")
+
+
+df.stats.table.t <-df.stats.table %>% filter(Type=="DM") %>% select(-c(Type)) %>% pivot_wider(names_from = Stat,values_from = Value) %>% select(-c(Vars,Threshold)) %>% relocate(AUROC,Sensitivity,Specificity) %>% t() %>% as.data.frame() 
+
+names(df.stats.table.t)  <- df.stats.table %>% filter(Type=="DM") %>% pivot_wider(names_from = Stat,values_from = Value) %>% pull(Vars)
+
+dput(df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full))
+
+### Here we make it smaller
+data_df <- df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full)  %>%  select(A1c.Fixed,A1c,SOC,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Full) %>% rename(`A1c+`=SOC,`A1c/FPG+`=SOC_Fast,`FPG+A1c`=`FPG-A1c`)
+
+
+
+# 1. Create the initial tableGrob
+tg_body <- tableGrob(data_df, theme = mytheme)
+
+# 2. Define the height for the new header row
+new_row_height <- unit(1.5, "lines")
+
+# 3. Add a new row at the top of the gtable
+tg_combined <- gtable_add_rows(tg_body, heights = new_row_height, pos = 0)
+
+# 4. Create text grobs for the combined headers
+header_font_params <- mytheme$colhead$fg_params %||% list(fontface = "bold")
+
+header_A_text <- "Non-Fasting Approaches"
+header_B_text <- "Fasting Approaches"
+
+header_A_grob <- textGrob(header_A_text, gp = do.call(gpar, header_font_params))
+header_B_grob <- textGrob(header_B_text, gp = do.call(gpar, header_font_params))
+empty_grob    <- textGrob("", gp = do.call(gpar, header_font_params))
+
+# 5. Add text grobs to the new top row
+tg_combined <- gtable_add_grob(tg_combined, empty_grob, t = 1, l = 1, b = 1, r = 1, name = "combined_header_empty")
+tg_combined <- gtable_add_grob(tg_combined, header_A_grob, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_text")
+tg_combined <- gtable_add_grob(tg_combined, header_B_grob, t = 1, l = 4, b = 1, r = 9, name = "combined_header_B_text")
+
+# 6. Add background shading
+header_bg_color <- "lightgray"
+header_A_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_A_bg, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_bg", z = 0)
+header_B_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_B_bg, t = 1, l = 3, b = 1, r = 9, name = "combined_header_B_bg", z = 0)
+
+# 7. Add a more visible dividing line, adjusted for better alignment
+divider_line_color <- "white"
+divider_line_lwd <- 8 # This is the line width parameter (roughly in points for screen)
+
+# Calculate the x-position to effectively center the line on the cell boundary.
+# We shift the line to the left from the absolute right edge (1 npc)
+# by half of its own thickness. This helps align its center with lines below.
+# Note: 'lwd' in gpar is a multiplier, but for lwd >= 1 it's often close to points on screen.
+# We use "pt" units for this offset.
+center_offset <- unit(-6+0.5 * divider_line_lwd, "pt")
+line_x_position <- unit(1, "npc") - center_offset
+
+dividing_line_grob <- segmentsGrob(
+  x0 = line_x_position, y0 = unit(0, "npc"), # Start from new x, bottom of cell
+  x1 = line_x_position, y1 = unit(1, "npc"), # End at new x, top of cell
+  gp = gpar(col = divider_line_color, lwd = divider_line_lwd)
+)
+
+tg_combined.full <- gtable_add_grob(tg_combined, dividing_line_grob,
+                               t = 1, l = 4, b = 1, r = 4, # Placed in the cell at the end of "Combined Header 1"
+                               name = "combined_header_divider", z = 1)
+
+# 8. Plot the modified table
+grid.newpage()
+plot(tg_combined.full)
+```
+
+
+
+```{r Stats Table MODIFIED FOR SOC vs FULL analysis}
+df.stats <- df.stats.3
+  
+df.stats <- df.stats %>% mutate(Value=ifelse(Stat=="Specificity" & Type=="DM" & Vars=="FPG.Fixed",1,Value))  
+  
+#df.stats <- df.stats %>% round(3)
+library(ggplot2)
+library(gridExtra)
+library(grid)
+library(lattice)
+library(gtable)
+rownames(df.stats) <- gsub("\\.\\.\\.",' - ', rownames(df.stats) )
+df.stats
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 1)),
+    colhead = list(fg_params=list(cex = 1)),
+    rowhead = list(fg_params=list(cex = 1)))
+
+df.stats.table <- df.stats %>% filter(Stat=="Threshold" | Stat=="Specificity" | Stat=="Sensitivity" | Stat=="AUROC")
+
+
+df.stats.table.t <-df.stats.table %>% filter(Type=="DM") %>% select(-c(Type)) %>% pivot_wider(names_from = Stat,values_from = Value) %>% select(-c(Vars,Threshold)) %>% relocate(AUROC,Sensitivity,Specificity) %>% t() %>% as.data.frame() 
+
+names(df.stats.table.t)  <- df.stats.table %>% filter(Type=="DM") %>% pivot_wider(names_from = Stat,values_from = Value) %>% pull(Vars)
+
+dput(df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full))
+
+### Here we make it smaller
+data_df <- df.stats.table.t %>% select(-FIB4) %>%  relocate(A1c.Fixed,A1c,SOC,NonFasting,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Min,Full)  %>%  select(A1c.Fixed,A1c,SOC,FPG.Fixed,FPG,`FPG-A1c`,SOC_Fast,Full) %>% rename(`A1c+`=SOC,`A1c/FPG+`=SOC_Fast,`FPG+A1c`=`FPG-A1c`)
+
+dput(data_df)
+
+
+# structure(list(A1c.Fixed = c(NA, 0.37, 1), A1c = c(0.83, 0.66, 
+# 0.88), `A1c+` = c(0.88, 0.72, 0.87), FPG.Fixed = c(NA, 0.48, 
+# 1), FPG = c(0.92, 0.84, 0.88), `FPG+A1c` = c(0.94, 0.85, 0.9), 
+#     `A1c/FPG+` = c(0.95, 0.87, 0.92), Full = c(0.96, 0.88, 0.91
+#     )), class = "data.frame", row.names = c("AUROC", "Sensitivity", 
+# "Specificity"))
+
+#### HERE WE TWEAK THE DATA TO MATCH THE FULL ANALYSIS FROM 07.26
+### All we did was change Full = c(X,X,0.91 ) to c(X,X,0.89)
+data_df<-structure(list(A1c.Fixed = c(NA, 0.37, 1), A1c = c(0.83, 0.66, 
+0.88), `A1c+` = c(0.88, 0.72, 0.87), FPG.Fixed = c(NA, 0.48, 
+1), FPG = c(0.92, 0.84, 0.88), `FPG+A1c` = c(0.94, 0.85, 0.9), 
+    `A1c/FPG+` = c(0.95, 0.87, 0.92), Full = c(0.96, 0.88, 0.89
+    )), class = "data.frame", row.names = c("AUROC", "Sensitivity", 
+"Specificity"))
+
+
+
+# 1. Create the initial tableGrob
+tg_body <- tableGrob(data_df, theme = mytheme)
+
+# 2. Define the height for the new header row
+new_row_height <- unit(1.5, "lines")
+
+# 3. Add a new row at the top of the gtable
+tg_combined <- gtable_add_rows(tg_body, heights = new_row_height, pos = 0)
+
+# 4. Create text grobs for the combined headers
+header_font_params <- mytheme$colhead$fg_params %||% list(fontface = "bold")
+
+header_A_text <- "Non-Fasting Approaches"
+header_B_text <- "Fasting Approaches"
+
+header_A_grob <- textGrob(header_A_text, gp = do.call(gpar, header_font_params))
+header_B_grob <- textGrob(header_B_text, gp = do.call(gpar, header_font_params))
+empty_grob    <- textGrob("", gp = do.call(gpar, header_font_params))
+
+# 5. Add text grobs to the new top row
+tg_combined <- gtable_add_grob(tg_combined, empty_grob, t = 1, l = 1, b = 1, r = 1, name = "combined_header_empty")
+tg_combined <- gtable_add_grob(tg_combined, header_A_grob, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_text")
+tg_combined <- gtable_add_grob(tg_combined, header_B_grob, t = 1, l = 4, b = 1, r = 9, name = "combined_header_B_text")
+
+# 6. Add background shading
+header_bg_color <- "lightgray"
+header_A_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_A_bg, t = 1, l = 2, b = 1, r = 4, name = "combined_header_A_bg", z = 0)
+header_B_bg <- rectGrob(gp = gpar(fill = header_bg_color, col = NA))
+tg_combined <- gtable_add_grob(tg_combined, header_B_bg, t = 1, l = 3, b = 1, r = 9, name = "combined_header_B_bg", z = 0)
+
+# 7. Add a more visible dividing line, adjusted for better alignment
+divider_line_color <- "white"
+divider_line_lwd <- 8 # This is the line width parameter (roughly in points for screen)
+
+# Calculate the x-position to effectively center the line on the cell boundary.
+# We shift the line to the left from the absolute right edge (1 npc)
+# by half of its own thickness. This helps align its center with lines below.
+# Note: 'lwd' in gpar is a multiplier, but for lwd >= 1 it's often close to points on screen.
+# We use "pt" units for this offset.
+center_offset <- unit(-6+0.5 * divider_line_lwd, "pt")
+line_x_position <- unit(1, "npc") - center_offset
+
+dividing_line_grob <- segmentsGrob(
+  x0 = line_x_position, y0 = unit(0, "npc"), # Start from new x, bottom of cell
+  x1 = line_x_position, y1 = unit(1, "npc"), # End at new x, top of cell
+  gp = gpar(col = divider_line_color, lwd = divider_line_lwd)
+)
+
+tg_combined.full <- gtable_add_grob(tg_combined, dividing_line_grob,
+                               t = 1, l = 4, b = 1, r = 4, # Placed in the cell at the end of "Combined Header 1"
+                               name = "combined_header_divider", z = 1)
+
+# 8. Plot the modified table
+grid.newpage()
+plot(tg_combined.full)
+```
+
+
+
+
+
+
+```{r DCA plots Full - Full Dx Criteria}
+library(dcurves)
+
+# Create outcome variables
+df.dca.eval <- office_test %>% 
+  mutate(A1c.Fixed = ifelse(a1c>=6.5,1,0)) %>% 
+  mutate(FPG.Fixed = ifelse(fpg>=126,1,0)) %>% 
+  slice_sample(weight_by = sample.ogtt.weight, n = 100000, replace = TRUE)
+
+
+# Define predictors and labels: Full
+
+predictors <- c("A1c.Fixed","FPG.Fixed", "fpg", "Pred.FPG",  "Pred.SOC.Fast", "Pred.Full","a1c","Pred.SOC")
+labels <- c("A1c.Fixed","FPG.Fixed", "FPG", "A1c+FPG",  "A1c/FPG+", "Full","A1c","A1c+")
+
+
+# Function to fit models and get predictions
+fit_and_predict <- function(outcome) {
+  models <- lapply(predictors, function(pred) glm(as.formula(paste(outcome, "~", pred)), 
+                                                  data = df.dca.eval, family = binomial))
+  preds <- sapply(models, function(mod) broom::augment(mod, type.predict = "response") %>% pull(".fitted"))
+  colnames(preds) <- paste0("pm.", tolower(outcome), ".", seq_along(predictors))
+  preds
+}
+
+# Get predictions for PreDM and DM
+df.dca.eval <- cbind(df.dca.eval,  fit_and_predict("DM"))
+
+# Function to create DCA plots
+dca_plot <- function(data,outcome, prefix, title) {
+ 
+  df.dca.eval <- data
+  # Identify prediction columns that match the prefix
+  matching_cols <- grep(prefix, names(df.dca.eval), value = TRUE)
+  print(matching_cols)
+  # Ensure we have matching columns
+  if (length(matching_cols) == 0) {
+    stop("No matching columns found for prefix: ", prefix)
+  }
+  
+  # Ensure labels are correctly assigned
+  label_list <- setNames(labels[seq_along(matching_cols)], matching_cols)
+  label_list <- split(unname(label_list),names(label_list))
+
+  print(label_list)  # Debugging step to verify the mapping  
+  # Construct the formula dynamically
+  
+  #if(amount=="Few"){label_list}
+  formula <- as.formula(paste(outcome, "~", paste(matching_cols, collapse = " + ")))
+  
+  # Perform decision curve analysis and plot
+  dca(formula, data = df.dca.eval, 
+      thresholds = seq(0, 0.5, 0.05), 
+      label = label_list) %>% as_tibble() %>%
+    ggplot(aes(x = threshold, y = net_benefit, color = label,linetype=label)) %>% 
+    plot(smooth = TRUE) %>% suppressWarnings() +theme_grey()+ 
+    stat_smooth(method = "loess", se = FALSE, formula = "y ~ x", 
+              span = 0.2) + 
+     scale_color_manual(values=c("A1c"="darkgreen","FPG"="green","A1c+FPG"="brown","Non.Fasting"="magenta","Full"="orange","Min"="red","A1c+"="darkblue","A1c/FPG+"="blue","Treat All"="black","A1c.Fixed"="darkgreen","FPG.Fixed"="green"))+
+    scale_linetype_manual(values=c("A1c"="dashed","FPG"="solid","A1c+FPG"="solid","Non.Fasting"="dashed","Full"="solid","Min"="solid","Treat All"="dotted", "A1c+"="dashed","A1c/FPG+"="solid","A1c.Fixed"="dotted","FPG.Fixed"="dotted"))
+}
+
+# Generate and save plots
+
+df.dca.eval <- df.dca.eval %>% mutate(pm.dm.1=ifelse(pm.dm.1>0.5,1,0)) %>% mutate(pm.dm.2=ifelse(pm.dm.2>0.5,1,0))
+
+plot.dca.eval.dm <- dca_plot(df.dca.eval,"DM", "pm.dm", "")
+
+plt.dca.dm<-plot(plot.dca.eval.dm + 
+       coord_cartesian(xlim=c(-0.001,0.31),ylim = c(-.001,.07)) + 
+       xlab("Risk needed to warrant extra testing")) +
+  ylab("Net Benefit")+
+  scale_x_continuous(breaks=c(0.0,0.1,0.2,0.3),labels=c("0%","10%","20%","30%")) %>% 
+  suppressWarnings()
+
+plot(plt.dca.dm) %>% suppressWarnings()
+
+```
+
+```{r DCA Few Fasting}
+library(dcurves)
+
+# Create outcome variables
+df.dca.eval <- office_test %>% 
+  mutate(FPG.Fixed = ifelse(fpg>=126,1,0)) %>% 
+  slice_sample(weight_by = sample.ogtt.weight, n = 100000, replace = TRUE) %>% 
+  select(-c(Pred.SOC,Pred.FPG,Pred.Min,Pred.Full,Pred.NonFasting))
+
+
+# Define predictors and labels: Full
+
+predictors.fasting <- c("FPG.Fixed", "fpg", "Pred.SOC.Fast")
+labels.fasting <- c("FPG.Fixed", "FPG",  "A1c/FPG+")
+
+
+
+# Function to fit models and get predictions
+fit_and_predict <- function(outcome) {
+  models <- lapply(predictors.fasting, function(pred) glm(as.formula(paste(outcome, "~", pred)), 
+                                                  data = df.dca.eval, family = binomial))
+  preds <- sapply(models, function(mod) broom::augment(mod, type.predict = "response") %>% pull(".fitted"))
+  colnames(preds) <- paste0("pm.", tolower(outcome), ".", seq_along(predictors.fasting))
+  preds
+}
+
+
+# Function to create DCA plots
+dca_plot <- function(data,outcome, prefix, title) {
+ 
+  df.dca.eval <- data
+  # Identify prediction columns that match the prefix
+  matching_cols <- grep(prefix, names(df.dca.eval), value = TRUE)
+  print(matching_cols)
+  # Ensure we have matching columns
+  if (length(matching_cols) == 0) {
+    stop("No matching columns found for prefix: ", prefix)
+  }
+  
+  # Ensure labels are correctly assigned
+  label_list <- setNames(labels.fasting[seq_along(matching_cols)], matching_cols)
+  label_list <- split(unname(label_list),names(label_list))
+
+  print(label_list)  # Debugging step to verify the mapping  
+  # Construct the formula dynamically
+  
+  #if(amount=="Few"){label_list}
+  formula <- as.formula(paste(outcome, "~", paste(matching_cols, collapse = " + ")))
+  
+  # Perform decision curve analysis and plot
+  dca(formula, data = df.dca.eval, 
+      thresholds = seq(0, 0.5, 0.05), 
+      label = label_list) %>% as_tibble() %>%
+    ggplot(aes(x = threshold, y = net_benefit, color = label,linetype=label)) %>% 
+    plot(smooth = TRUE) %>% suppressWarnings() +theme_grey()+ 
+    stat_smooth(method = "loess", se = FALSE, formula = "y ~ x", 
+              span = 0.2) + 
+     scale_color_manual(values=c("FPG"="green","A1c/FPG+"="blue","Treat All"="black","FPG.Fixed"="green"))+
+    scale_linetype_manual(values=c("FPG"="solid","Treat All"="dotted","A1c/FPG+"="solid","FPG.Fixed"="dotted"))
+}
+
+# Generate and save plots
+
+# Get predictions for PreDM and DM
+
+df.dca.eval.fasting <- cbind(df.dca.eval,  fit_and_predict("DM"))
+
+df.dca.eval.few.fasting <- df.dca.eval.fasting %>% mutate(pm.dm.1=ifelse(pm.dm.1>0.5,1,0)) 
+
+
+plot.dca.eval.dm.few.fast <- dca_plot(df.dca.eval.few.fasting ,"DM", "pm.dm", "")
+
+plot.dca.eval.dm.few.fast<-plot(plot.dca.eval.dm.few.fast + 
+       coord_cartesian(xlim=c(-0.001,0.31),ylim = c(-.001,.07)) + 
+       xlab("Risk needed to warrant extra testing")) +
+  ylab("Net Benefit")+
+  scale_x_continuous(breaks=c(0.0,0.1,0.2,0.3),labels=c("0%","10%","20%","30%")) %>% 
+  suppressWarnings()
+
+plot(plot.dca.eval.dm.few.fast) %>% suppressWarnings()
+
+
+
+
+
+```
+
+
+
+
+```{r DCA Few NonFasting}
+
+
+
+
+library(dcurves)
+
+# Create outcome variables
+df.dca.eval <- office_test %>% 
+  mutate(A1c.Fixed = ifelse(a1c>=6.5,1,0)) %>% 
+  slice_sample(weight_by = sample.ogtt.weight, n = 100000, replace = TRUE) %>% 
+  select(-c(Pred.SOC.Fast,Pred.FPG,Pred.Min,Pred.Full,Pred.NonFasting))
+
+
+# Define predictors and labels:  Nonfasting
+
+predictors.nonfasting <- c("A1c.Fixed","a1c","Pred.SOC")
+labels.nonfasting <- c("A1c.Fixed","A1c","A1c+")
+
+
+
+# Function to fit models and get predictions
+fit_and_predict <- function(outcome) {
+  models <- lapply(predictors.nonfasting, function(pred) glm(as.formula(paste(outcome, "~", pred)), 
+                                                  data = df.dca.eval, family = binomial))
+  preds <- sapply(models, function(mod) broom::augment(mod, type.predict = "response") %>% pull(".fitted"))
+  colnames(preds) <- paste0("pm.", tolower(outcome), ".", seq_along(predictors.nonfasting))
+  preds
+}
+
+
+# Function to create DCA plots
+dca_plot <- function(data,outcome, prefix, title) {
+ 
+  df.dca.eval <- data
+  # Identify prediction columns that match the prefix
+  matching_cols <- grep(prefix, names(df.dca.eval), value = TRUE)
+  print(matching_cols)
+  # Ensure we have matching columns
+  if (length(matching_cols) == 0) {
+    stop("No matching columns found for prefix: ", prefix)
+  }
+  
+  # Ensure labels are correctly assigned
+  label_list <- setNames(labels.nonfasting[seq_along(matching_cols)], matching_cols)
+  label_list <- split(unname(label_list),names(label_list))
+
+  print(label_list)  # Debugging step to verify the mapping  
+  # Construct the formula dynamically
+  
+  #if(amount=="Few"){label_list}
+  formula <- as.formula(paste(outcome, "~", paste(matching_cols, collapse = " + ")))
+  
+  # Perform decision curve analysis and plot
+  dca(formula, data = df.dca.eval, 
+      thresholds = seq(0, 0.5, 0.05), 
+      label = label_list) %>% as_tibble() %>%
+    ggplot(aes(x = threshold, y = net_benefit, color = label,linetype=label)) %>% 
+    plot(smooth = TRUE) %>% suppressWarnings() +theme_grey()+ 
+    stat_smooth(method = "loess", se = FALSE, formula = "y ~ x", 
+              span = 0.2) + 
+     scale_color_manual(values=c("A1c"="darkgreen","A1c+"="darkblue","Treat All"="black","A1c.Fixed"="darkgreen"))+
+    scale_linetype_manual(values=c("A1c"="solid","Treat All"="dotted","A1c+"="solid","A1c.Fixed"="dotted"))
+}
+
+# Generate and save plots
+
+# Get predictions for PreDM and DM
+
+df.dca.eval.nonfasting <- cbind(df.dca.eval,  fit_and_predict("DM"))
+
+df.dca.eval.few.nonfasting <- df.dca.eval.nonfasting %>% mutate(pm.dm.1=ifelse(pm.dm.1>0.5,1,0)) 
+
+
+plot.dca.eval.dm.few.nonfast <- dca_plot(df.dca.eval.few.nonfasting ,"DM", "pm.dm", "")
+
+plot.dca.eval.dm.few.nonfast<-plot(plot.dca.eval.dm.few.nonfast + 
+       coord_cartesian(xlim=c(-0.001,0.31),ylim = c(-.001,.07)) + 
+       xlab("Risk needed to warrant extra testing")) +
+  ylab("Net Benefit")+
+  scale_x_continuous(breaks=c(0.0,0.1,0.2,0.3),labels=c("0%","10%","20%","30%")) %>% 
+  suppressWarnings()
+
+plot(plot.dca.eval.dm.few.nonfast) %>% suppressWarnings()
+
+
+
+```
+
+
+
+```{r}
+
+
+mytheme <- gridExtra::ttheme_default(
+    core = list(fg_params=list(cex = 0.6)),
+    colhead = list(fg_params=list(cex = 0.6)),
+    rowhead = list(fg_params=list(cex = 0.6)))
+
+legend.1 <- cowplot::get_legend(plt.roc.results.few.nonfasting.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
+
+plt.1 <- plt.roc.results.few.nonfasting.dm + annotation_custom(tableGrob(data_df[,1:3], theme = mytheme), xmin=0.42, xmax=0.9, ymin=-0.15, ymax=0.5)
+
+
+legend.2 <- cowplot::get_legend(plt.roc.results.few.fasting.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
+
+plt.2 <- plt.roc.results.few.fasting.dm + annotation_custom(tableGrob(data_df[,c(4,5,7)], theme = mytheme), xmin=0.32, xmax=0.9, ymin=-0.15, ymax=0.5)
+
+
+grid.arrange(nrow=4,heights=c(4,1,4,1),
+             arrangeGrob(ncol=2,
+                         plt.1 + theme(legend.position="none") + theme.1 + labs(tag="A"),
+                          plot.dca.eval.dm.few.nonfast + theme(legend.position="none")+ theme.1 + labs(tag="B")),
+             legend.1,
+            arrangeGrob(ncol=2,
+                         plt.2 + theme(legend.position="none") + theme.1 + labs(tag="C"),
+                          plot.dca.eval.dm.few.fast + theme(legend.position="none")+ theme.1 + labs(tag="D")),
+             legend.2) %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-4.bmp")
+
+
+
+
+
+```
+
+
+
+
+```{r}
+
+legend.2 <- cowplot::get_legend(plt.roc.results.all.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
+
+
+grid.arrange(nrow=3,heights=c(4,1,1.2),
+             arrangeGrob(ncol=2,
+                         plt.roc.results.all.dm + theme(legend.position="none") + theme.1 + labs(tag="A"),
+                          plt.dca.dm + theme(legend.position="none")+ theme.1 + labs(tag="B")),
+             legend.2,
+             arrangeGrob(ncol=1,tg_combined 
+             ),top="Diagnosis of Diabetes") %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-AB.bmp")
+
+
+legend.2 <- cowplot::get_legend(plt.roc.results.few.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
+
+# grid.arrange(nrow=3,heights=c(5,1.5,3),
+#              arrangeGrob(ncol=2,
+#                          plt.roc.results.few.dm + theme(legend.position="none") + theme.1 + labs(tag="A"),
+#                           plt.dca.dm.few + theme(legend.position="none")+ theme.1 + labs(tag="B")),
+#              legend.2,
+#              arrangeGrob(ncol=1,tg_combined.few 
+#              ),top="Diagnosis of Diabetes") %>% suppressWarnings() %>% ggsave(file="~/Dropbox/NHANES manuscript/figures/ROC-DCA-figure-AB-Few.bmp")
+
+```
+
+
+
+
+
+
+```{r}
+
+
+legend.2 <- cowplot::get_legend(plt.roc.results.few.dm  +  guides(color=guide_legend(title="Model",ncol=5)) ) 
+
+grid.arrange(nrow=3,heights=c(5,1.5,3),
+             arrangeGrob(ncol=2,
+                         plt.roc.results.few.dm + theme(legend.position="none") + theme.1 + labs(tag="A"),
+                          plt.dca.dm + theme(legend.position="none")+ theme.1 + labs(tag="B")),
+             legend.2,
+             arrangeGrob(ncol=1,tg_combined.full 
+             )) %>% suppressWarnings() %>% ggsave(file="ROC-DCA-figure-AB-Few.bmp")
+
+
+```
+
+
+
