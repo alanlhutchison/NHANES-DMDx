@@ -62,107 +62,21 @@ office_ext <- office_pre %>% rename(sample.weight = sample.mec.weight) %>% selec
 ```
 
 
-```{r}
-
-mort_files <- list.files(
-  path       = "~/Documents/MORTALITY-DATA/1999-2004/",
-  pattern    = "\\.dat$",        
-  full.names = TRUE
-)
-
-mort_fwf <- fwf_cols(
-  SEQN       = c(1, 14),
-  eligstat   = c(15, 15),
-  mortstat   = c(16, 16),
-  ucod_lead  = c(17, 19),
-  diabetes   = c(20, 20),
-  hyperten   = c(21, 21),
-  permth_int = c(43, 45),
-  permth_exm = c(46, 48)
-)
-mort_types <- cols(
-  SEQN       = col_character(),
-  ucod_lead  = col_character(),
-  .default   = col_integer()
-)
-
-mortality_df <- mort_files %>% 
-  map_dfr(~ read_fwf(
-      file         = .x,
-      col_positions= mort_fwf,
-      col_types    = mort_types,
-      na           = c("", ".")
-    )) %>%
-  select(SEQN, mortstat, permth_exm,ucod_lead,diabetes) %>%
-  mutate(
-    SEQN = sprintf("%05d", as.integer(str_trim(SEQN)))
-  ) %>%
-  distinct()
-
-```
-
-
-```{r Mortality Data 1999-2004}
-################
-#NHANES VERSION#
-################
-
-files.mort <- c("~/Documents/MORTALITY-DATA/1999-2004/NHANES_1999_2000_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2001_2002_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2003_2004_MORT_2019_PUBLIC.dat")
-
-years <- c(1999,2001,2003)
-mort.table.1999 <- data.frame()
-for (i in c(1:length(files.mort))){
-  file <- files.mort[i]
-  year <- years[i]
-srvyin <- file  # full .DAT name here
-#srvyout <- "NHANES_2015" # shorthand dataset name here
-
-# Example syntax:
-#srvyin <- paste("NHANES_1999_2000_MORT_2019_PUBLIC.dat")   
-#srvyout <- "NHANES_1999_2000"      
-# read in the fixed-width format ASCII file
-dsn <- read_fwf(file=srvyin,
-                col_types = "iiiiiiii",
-                fwf_cols(seqn = c(1,6),
-                         eligstat = c(15,15),
-                         mortstat = c(16,16),
-                         ucod_leading = c(17,19),
-                         diabetes = c(20,20),
-                         hyperten = c(21,21),
-                         permth_int = c(43,45),
-                         permth_exm = c(46,48)
-                ),
-                na = c("", ".")
-)
-dsn$Year <- as.integer(year)
-print(year)
-if (nrow(mort.table.1999)==0){
-  mort.table.1999 <- dsn
-} else{
-  mort.table.1999 <- mort.table.1999 %>% rbind(dsn)
-}
-
-}
-```
-
-
 
 ```{r Mortality Data 1999-2016}
 ################
 #NHANES VERSION#
 ################
 
-files.mort <- c("~/Documents/MORTALITY-DATA/1999-2004/NHANES_1999_2000_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2001_2002_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/1999-2004/NHANES_2003_2004_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2005_2006_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2013_2014_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2015_2016_MORT_2019_PUBLIC.dat")
+files.mort <- c("MORTALITY-DATA/1999-2004/NHANES_1999_2000_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/1999-2004/NHANES_2001_2002_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/1999-2004/NHANES_2003_2004_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2005_2006_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2013_2014_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2015_2016_MORT_2019_PUBLIC.dat")
 
 years <- c(1999,2001,2003,2005,2007,2009,2011,2013,2015)
 mort.table <- data.frame()

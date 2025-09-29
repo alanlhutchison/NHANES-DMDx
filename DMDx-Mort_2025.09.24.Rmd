@@ -375,12 +375,12 @@ df.mo$Year <- as.integer(df.mo$Year)
 #NHANES VERSION#
 ################
 
-files.mort <- c("~/Documents/MORTALITY-DATA/NHANES_2005_2006_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2013_2014_MORT_2019_PUBLIC.dat",
-                "~/Documents/MORTALITY-DATA/NHANES_2015_2016_MORT_2019_PUBLIC.dat")
+files.mort <- c("MORTALITY-DATA/NHANES_2005_2006_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2007_2008_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2009_2010_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2011_2012_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2013_2014_MORT_2019_PUBLIC.dat",
+                "MORTALITY-DATA/NHANES_2015_2016_MORT_2019_PUBLIC.dat")
 
 years <- c(2005,2007,2009,2011,2013,2015)
 mort.table <- data.frame()
