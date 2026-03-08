@@ -1,0 +1,496 @@
+---
+title: "DPPOS-df"
+output: html_document
+date: "2025-11-01"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+
+library(caret)
+library(xgboost)
+```
+
+
+```{r}
+2+2
+```
+
+
+
+```{r setup Phase 1, include=FALSE}
+path <- "~/Documents/Data/"
+demo.1   <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Non_Form_Based/demographic.csv")) %>% mutate(Phase="1")
+events.1 <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Non_Form_Based/events.csv"))  %>% mutate(Phase="1")
+lab.1    <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Non_Form_Based/laboratory.csv"))  %>% mutate(Phase="1")
+
+f02.1  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Form_Based/F02.csv"))  %>% mutate(Phase="1")
+f06.1  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Form_Based/F06.csv"))  %>% mutate(Phase="1")
+q16.1  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Form_Based/Q16.csv"))  %>% mutate(Phase="1")
+
+standardize_id <- function(df) {
+  if ("RELEASE_ID" %in% names(df)) return(df)
+  if ("release_id" %in% names(df)) {
+  return(dplyr::rename(df, RELEASE_ID = release_id))
+  }
+  
+  
+  stop("No RELEASE_ID or release_id column found in this data frame.")
+}
+
+demo.1   <- standardize_id(demo.1)
+events.1 <- standardize_id(events.1)
+lab.1    <- standardize_id(lab.1)
+f02.1    <- standardize_id(f02.1)
+f06.1    <- standardize_id(f06.1)
+q16.1    <- standardize_id(q16.1)
+```
+
+
+```{r setup Phase 2, include=FALSE}
+demo.2   <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Non_Form_Based/demographic.csv")) %>% mutate(Phase="2")
+events.2 <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Non_Form_Based/events.csv")) %>% mutate(Phase="2")
+lab.2    <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Non_Form_Based/lab.csv")) %>% mutate(Phase="2")
+
+f02.2  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Form_Based/F02.csv")) %>% mutate(Phase="2")
+f06.2  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Form_Based/F06.csv")) %>% mutate(Phase="2")
+q16.2  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Form_Based/Q16.csv")) %>% mutate(Phase="2")
+
+
+
+demo.2   <- standardize_id(demo.2)
+events.2 <- standardize_id(events.2)
+lab.2    <- standardize_id(lab.2)
+f02.2    <- standardize_id(f02.2)
+f06.2    <- standardize_id(f06.2)
+q16.2    <- standardize_id(q16.2)
+```
+
+```{r setup Phase 3, include=FALSE}
+demo.3   <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Non_Form_Based/demographic.csv")) %>% mutate(Phase="3")
+demo.3 <- demo.3 %>% rename(BMI=bmi,AGE=age,SEX=sex) %>% 
+  mutate(
+    # Collapse BMI into 10 categories (2 kg/m^2 intervals)
+    # Definition: <26, >=26-<28, ..., >=42
+    BMI_CAT = case_when(
+      BMI < 26 ~ 1,
+      BMI >= 26 & BMI < 28 ~ 2,
+      BMI >= 28 & BMI < 30 ~ 3,
+      BMI >= 30 & BMI < 32 ~ 4,
+      BMI >= 32 & BMI < 34 ~ 5,
+      BMI >= 34 & BMI < 36 ~ 6,
+      BMI >= 36 & BMI < 38 ~ 7,
+      BMI >= 38 & BMI < 40 ~ 8,
+      BMI >= 40 & BMI < 42 ~ 9,
+      BMI >= 42 ~ 10,
+      TRUE ~ NA_real_ # Handle missing data
+    ),
+
+    # Collapse AGE into 7 categories (5-year intervals)
+    # Definition: <40, 40-44, ..., 65+
+    AGEGROUP = case_when(
+      AGE < 40 ~ 1,
+      AGE >= 40 & AGE < 45 ~ 2,
+      AGE >= 45 & AGE < 50 ~ 3,
+      AGE >= 50 & AGE < 55 ~ 4,
+      AGE >= 55 & AGE < 60 ~ 5,
+      AGE >= 60 & AGE < 65 ~ 6,
+      AGE >= 65 ~ 7,
+      TRUE ~ NA_real_ # Handle missing data
+    ),
+    # Collapse BMI into 3 categories (Tertiles)
+    # Definition: <30, >=30 to <35, >=35
+    BMIGROUP = case_when(
+      BMI < 30 ~ 1,
+      BMI >= 30 & BMI < 35 ~ 2,
+      BMI >= 35 ~ 3,
+      TRUE ~ NA_real_ # Handle missing data
+    )
+  )
+
+newdm.3 <- read.csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Non_Form_Based/DIABETES.CSV")) %>% mutate(Phase="3")
+cvd.mort.3 <- read.csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Non_Form_Based/CVD_MORT_CANC.CSV")) %>% mutate(Phase="3")
+#events.3 <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Non_Form_Based/events.csv"))
+lab.3    <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Non_Form_Based/LAB.csv")) %>% mutate(Phase="3")
+
+f02.3  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Form_Based/F02.csv")) %>% mutate(Phase="3")
+f06.3  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Form_Based/F06.csv")) %>% mutate(Phase="3")
+q26.3  <- read_csv(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Form_Based/Q26.csv")) %>% mutate(Phase="3")
+
+
+
+demo.3   <- standardize_id(demo.3)
+#events.3 <- standardize_id(events.3)
+newdm.3 <- standardize_id(newdm.3)
+cvd.mort.3 <- standardize_id(cvd.mort.3)
+lab.3    <- standardize_id(lab.3)
+f02.3    <- standardize_id(f02.3)
+f06.3    <- standardize_id(f06.3)
+q26.3    <- standardize_id(q26.3)
+```
+
+```{r setup Bridge, include=FALSE}
+demo.b   <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Non_Form_Based/demographic.csv"))%>% mutate(Phase="Bridge")
+events.b <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Non_Form_Based/events.csv"))  %>% mutate(Phase="Bridge")
+lab.b    <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Non_Form_Based/LAB.csv"))  %>% mutate(Phase="Bridge")
+
+f02.b  <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Form_Based/F02.csv"))  %>% mutate(Phase="Bridge")
+#f06.b  <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Form_Based/F06.csv")
+#q16.b  <- read_csv(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Form_Based/Q16.csv")
+
+
+
+demo.b   <- standardize_id(demo.b)
+events.b <- standardize_id(events.b)
+lab.b    <- standardize_id(lab.b)
+f02.b    <- standardize_id(f02.b)
+#f06.b    <- standardize_id(f06.b)
+#q16.b    <- standardize_id(q16.b)
+```
+
+
+```{r}
+q16.1
+```
+
+
+```{r}
+demo <- rbind(demo.1 %>% mutate(AGE=NA,BMI=NA),
+              demo.2 %>% mutate(AGE=NA,BMI=NA),
+              demo.3 %>% select(-c(R16)),
+              demo.b %>% mutate(AGE=NA,BMI=NA)) %>% arrange(RELEASE_ID, Phase) %>% relocate(RELEASE_ID,Phase,ASSIGN) # %>% filter(ASSIGN=="Lifestyle" | ASSIGN=="Placebo") 
+
+lab <- rbind(lab.1 %>% select(RELEASE_ID,VISIT,G000,G120,HBA1,CREA,Phase,DAYSRAND,CHOL,CHDL,CLDL),
+      lab.2 %>% select(RELEASE_ID,VISIT,G000,G120,HBA1,CREA,Phase,DAYSRAND,CHOL,CHDL,CLDL),
+      lab.3 %>% select(RELEASE_ID,VISIT,G000,G120,HBA1,CREA,Phase,DAYSRAND,CHOL,CHDL,CLDL),      
+      lab.b %>% select(RELEASE_ID,VISIT,G000,G120,HBA1,CREA,Phase,DAYSRAND,CHOL,CHDL,CLDL)
+      )
+
+events <- rbind(
+  rbind(events.1,events.2) %>% select(-RANDPER),
+  newdm.3 %>% select(-c(D6DATA,CLINIC)),
+  events.b %>% select(RELEASE_ID,TOTALTIM,DIABF,DIABT,DIABV,Phase)) %>% arrange(RELEASE_ID, Phase) %>% relocate(RELEASE_ID,Phase)
+
+
+# names(rbind(lab.1,lab.2 %>% select(-UCRE))  %>% select(-c( LDLB   ,    LDLC   ,    LDLZ  ,     FIBR    ,   CRP )))
+# names(lab.3)
+# lab.temp <- rbind(
+#   rbind(lab.1,lab.2 %>% select(-UCRE))  %>% select(-c( LDLB   ,    LDLC   ,    LDLZ  ,     FIBR    ,   CRP )),
+#   lab.3 %>% select(-VB12)) %>% select(-c(DRNK0M,DRNK30M,DRNK2H))
+# 
+# lab.b2 <- lab.b[,names(lab.temp)]
+# lab <- rbind(lab.temp,lab.b2)
+
+
+
+
+# f06.names <- intersect(intersect(names(f06.1),names(f06.2)),names(f06.3))
+# f06 <- rbind(f06.1[,f06.names],
+#       f06.2[,f06.names],
+#       f06.3[,f06.names])
+
+#q16.names <- intersect(intersect(names(q16.1),names(q16.2)),names(q26.3))
+
+
+q26.3
+```
+
+
+```{r F02 codification}
+library(dplyr)
+library(readr)
+
+# Helper function to safely calculate means across columns, handling missing values
+# Returns NA if all columns are NA for that row
+safe_mean <- function(..., na.rm = TRUE) {
+  rowMeans(cbind(...), na.rm = na.rm)
+}
+
+process_f02 <- function(file_path, phase_name) {
+  
+  # Read dataset (suppressing column type messages for cleanliness)
+  data <- read_csv(file_path, show_col_types = FALSE)
+  
+  # Standardize column names to uppercase to handle inconsistencies
+  colnames(data) <- toupper(colnames(data))
+  
+  # Check for existence of specific physical measure columns before processing
+  # Note: "AP" prefix typically stands for "Annual Physical"
+  
+  # --- WEIGHT ---
+  # Usually APWGHT1 and APWGHT2. Sometimes a 3rd measure exists.
+  if("APWGHT1" %in% names(data)) {
+    cols_weight <- select(data, starts_with("APWGHT"))
+    data$WEIGHT_KG <- rowMeans(cols_weight, na.rm = TRUE)
+  } else {
+    data$WEIGHT_KG <- NA_real_
+  }
+  
+  # --- WAIST CIRCUMFERENCE ---
+  # Usually APWAIST1 and APWAIST2.
+  if("APWSTC1" %in% names(data)) {
+    cols_waist <- select(data, starts_with("APWSTC"))
+    data$WAIST_CM <- rowMeans(cols_waist, na.rm = TRUE)
+  } else {
+    data$WAIST_CM <- NA_real_
+  }
+  
+  # --- BLOOD PRESSURE (SYSTOLIC) ---
+  # Usually APSYS1, APSYS2, etc.
+  if("APSBP1" %in% names(data)) {
+    cols_sys <- select(data, starts_with("APSBP"))
+    data$BP_SYSTOLIC <- rowMeans(cols_sys, na.rm = TRUE)
+  } else {
+    data$BP_SYSTOLIC <- NA_real_
+  }
+  
+  # --- BLOOD PRESSURE (DIASTOLIC) ---
+  # Usually APDIA1, APDIA2, etc.
+  if("APDBP1" %in% names(data)) {
+    cols_dia <- select(data, starts_with("APDBP"))
+    data$BP_DIASTOLIC <- rowMeans(cols_dia, na.rm = TRUE)
+  } else {
+    data$BP_DIASTOLIC <- NA_real_
+  }
+  
+  # --- BLOOD PRESSURE (DIASTOLIC) ---
+  # Usually APDIA1, APDIA2, etc.
+  if("APHGHT1" %in% names(data)) {
+    cols_hgt <- select(data, starts_with("APHGHT"))
+    data$HEIGHT <- rowMeans(cols_hgt, na.rm = TRUE)
+  } else {
+    data$HEIGHT <- NA_real_
+  }  
+
+  
+  # --- CREATE FINAL HARMONIZED DATASET ---
+  clean_data <- data %>%
+    mutate(
+      Phase = phase_name,
+      # Ensure key identifiers exist
+      RELEASE_ID = as.character(RELEASE_ID),
+      VISIT = as.character(VISIT),
+      # Create a visit order proxy using DAYSRAND
+      DAYSRAND = if("DAYSRAND" %in% names(data)) DAYSRAND else NA_real_
+    ) %>%
+    select(
+      RELEASE_ID, 
+      DAYSRAND,
+      Phase,
+      VISIT, 
+      WEIGHT_KG, 
+      WAIST_CM, 
+      BP_SYSTOLIC, 
+      BP_DIASTOLIC, 
+      HEIGHT
+    )
+  
+  return(clean_data)
+}
+
+#--- EXECUTION ---
+#You would provide the specific file paths to your downloaded CSVs here
+bridge_df <- process_f02(paste0(path,"DPPOS_V6/Data/DPP_Bridge/Form_Based/f02.csv"), "Bridge")
+phase1_df <- process_f02(paste0(path,"DPPOS_V6/Data/DPPOS_Phase1/Form_Based/f02.csv"), "1")
+phase2_df <- process_f02(paste0(path,"DPPOS_V6/Data/DPPOS_Phase2/Form_Based/f02.csv"), "2")
+phase3_df <- process_f02(paste0(path,"DPPOS_V6/Data/DPPOS_Phase3/Form_Based/F02.csv"), "3")
+
+#Combine all
+all_f02_data <- bind_rows(bridge_df, phase1_df, phase2_df, phase3_df) %>%
+  arrange(RELEASE_ID, DAYSRAND)
+
+all_f02_data
+
+```
+
+```{r}
+```
+
+
+```{r}
+demo_unique   <- demo  # %>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+events_unique <- events #%>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+lab_unique    <- lab   # %>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+
+#if (exists("f02")) {
+#  f02_unique <- f02 %>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+#}
+# 
+# if (exists("f06")) {
+#   f06_unique <- f06 %>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+# }
+# 
+# if (exists("q16")) {
+#   q16_unique <- q16 %>% dplyr::distinct(RELEASE_ID, .keep_all = TRUE)
+# }
+
+vitals_f02 <- all_f02_data %>%
+  transmute(
+    RELEASE_ID,Phase,VISIT,DAYSRAND,
+    height_cm = HEIGHT,#rowMeans(select(., starts_with("APHGHT")), na.rm = TRUE),
+    weight_kg = WEIGHT_KG,#rowMeans(select(., starts_with("APWGHT")), na.rm = TRUE),
+    waist_cm      = WAIST_CM,
+    BPXSY       = BP_SYSTOLIC,#rowMeans(select(., starts_with("APSBP")),  na.rm = TRUE),
+    BPXDI       = BP_DIASTOLIC#rowMeans(select(., starts_with("APDBP")),  na.rm = TRUE)
+  )
+
+
+
+# vitals_f06 <- f06_unique %>%
+
+
+labs_bl <- lab_unique %>% 
+  transmute(
+    RELEASE_ID,Phase,VISIT,DAYSRAND,
+    LBXGLU = G000,  # fasting glucose
+    LBXGLT = G120,  # 2-hr OGTT
+    LBXGH  = HBA1,  # A1c
+    LBXSCR = CREA,   # creatinine
+    LBDHDD = CHDL, # HDL
+    LBXTC = CHOL, # Chol
+    LBDLDL = CLDL # LDL
+  )
+
+
+dppos_outcome <- events_unique %>%
+  transmute(
+    RELEASE_ID,Phase,
+    diabetes_flag    = if ("DIABF" %in% names(.)) DIABF else NA_real_,
+    time_to_diabetes = if ("DIABT" %in% names(.)) DIABT else NA_real_
+  )
+
+age_midpoints <- c(38, 42, 47, 52, 57, 62, 67)
+
+demo_baseline <- demo_unique %>%
+  mutate(
+    RIDAGEYR = if ("AGEGROUP" %in% names(.))
+                 age_midpoints[AGEGROUP]
+               else NA_real_,
+    RIAGENDR = if ("SEX" %in% names(.))
+                 as.numeric(SEX)
+               else NA_real_,
+    RIDRETH1 = if ("RACE_ETH" %in% names(.))
+                 as.numeric(RACE_ETH)
+               else NA_real_
+  ) %>%
+  select(RELEASE_ID, Phase, ASSIGN, AGE, RIDAGEYR, RIAGENDR, RIDRETH1)
+```
+
+
+```{r}
+dppos_derived<- labs_bl %>% 
+  left_join(vitals_f02 %>% mutate(RELEASE_ID=as.numeric(RELEASE_ID)) ,by=join_by(RELEASE_ID,VISIT,Phase)) %>% relocate(RELEASE_ID,VISIT) %>% arrange(RELEASE_ID,VISIT) %>%
+  left_join(demo_baseline,by=join_by(RELEASE_ID,Phase)) %>% 
+  left_join(dppos_outcome,by=join_by(RELEASE_ID,Phase))  %>% mutate(DAYSRAND=coalesce(DAYSRAND.x,DAYSRAND.y)) %>% select(-c(DAYSRAND.x,DAYSRAND.y))%>%
+  relocate(RELEASE_ID,DAYSRAND,AGE,RIDAGEYR)
+
+## FIXING AGE 
+dppos_derived <- dppos_derived %>% 
+  left_join(dppos_derived  %>% group_by(RELEASE_ID) %>% summarise(AGE.REAL= mean(AGE,na.rm=TRUE)) ,by=join_by(RELEASE_ID)) %>% select(-c(height_cm)) %>% 
+  left_join(dppos_derived  %>% group_by(RELEASE_ID) %>% summarise(height_cm= mean(height_cm,na.rm=TRUE)) ,by=join_by(RELEASE_ID)) %>%
+  relocate(RELEASE_ID,DAYSRAND,AGE.REAL,AGE,RIDAGEYR) %>% mutate(RIDAGEYR =round(AGE.REAL + DAYSRAND/365.25,1)) %>% select(-c(DAYSRAND,AGE.REAL,AGE))
+
+
+
+```
+
+
+```{r}
+# building DPPOS dataframe
+
+df_model2 <- dppos_derived %>%
+  mutate(
+    BMI      = ifelse(!is.na(weight_kg) & !is.na(height_cm) & height_cm > 0,
+                      weight_kg / ((height_cm/100)^2), NA_real_),
+    BMXWAIST = waist_cm,
+    BMXWT = weight_kg,
+    BMXHT = height_cm
+  ) %>%
+  select(
+    RELEASE_ID,Phase,VISIT,ASSIGN,
+    RIDAGEYR, RIAGENDR, RIDRETH1,
+    BMI, BMXWAIST, BPXSY, BPXDI,BMXHT,BMXWT,
+    LBDHDD, LBXTC, LBDLDL,    
+    LBXGLU, LBXGLT, LBXGH, LBXSCR,
+    diabetes_flag, time_to_diabetes
+  )
+
+cat("df_model2 built. Rows:", nrow(df_model2), "\n")
+
+
+## Must match the feature_cols used in the NHANES XGBoost model:
+feature_cols <- c(
+  "RIDAGEYR","RIAGENDR","RIDRETH1","INDFMPIR","DMDHHSIZ","BMXHT","BMXWT","LBDHDD", "LBXTC", "LBDLDL",
+  "BMI","BMXWAIST","BPXSY","BPXDI","LBXSCR","LBXGH","LBXGLU","VISIT","Phase","ASSIGN"
+)
+
+## Add missing NHANES predictors as NA (DPPOS doesn’t have income / HH size)
+df_dppos_full <- df_model2 %>%
+  mutate(
+    INDFMPIR = NA_real_,
+    DMDHHSIZ = NA_real_
+  )
+
+keep_vars <- intersect(
+  names(df_dppos_full),
+  c(
+    "RELEASE_ID",
+    "time_to_diabetes",
+    "diabetes_flag",
+    "LBXGLT",     # keep OGTT explicitly for analysis
+    feature_cols
+  )
+)
+
+df_dppos_model <- df_dppos_full[, keep_vars, drop = FALSE]  %>% relocate(RELEASE_ID,Phase,ASSIGN) %>% arrange(RELEASE_ID,Phase,ASSIGN,VISIT) 
+
+dropped_vars <- setdiff(names(df_dppos_full), names(df_dppos_model))
+cat("Dropped", length(dropped_vars), "DPPOS variables:\n")
+print(dropped_vars)
+```
+
+```{r}
+df_dppos_model_full <- df_dppos_model  
+df_dppos_model_noNAs.noItv <- df_dppos_model %>% filter(is.finite(LBXGLU),is.finite(LBXGLT),is.finite(LBXGH),!is.na(ASSIGN)) %>% filter(ASSIGN=="Lifestyle" | ASSIGN=="Placebo")
+df_dppos_model_noNAs.Itv <- df_dppos_model %>% filter(is.finite(LBXGLU),is.finite(LBXGLT),is.finite(LBXGH),!is.na(ASSIGN)) %>% filter(ASSIGN=="Metformin" | ASSIGN=="Troglitazone")
+
+```
+
+
+```{r}
+
+saveRDS(df_dppos_model_full,file =           paste0(path,"DPPOS_V6/New/df_dppos_model_full.rds"))
+readr::write_csv(df_dppos_model_full,file =  paste0(path,"DPPOS_V6/New/df_dppos_model_full.csv"))
+
+saveRDS(df_dppos_model_noNAs.noItv,file =           paste0(path,"DPPOS_V6/New/df_dppos_model_fullnoNAs.noItv.rds"))
+readr::write_csv(df_dppos_model_noNAs.noItv,file =  paste0(path,"DPPOS_V6/New/df_dppos_model_fullnoNAs.noItv.csv"))
+
+saveRDS(df_dppos_model_noNAs.Itv,file =           paste0(path,"DPPOS_V6/New/df_dppos_model_fullnoNAs.Itv.rds"))
+readr::write_csv(df_dppos_model_noNAs.Itv,file =  paste0(path,"DPPOS_V6/New/df_dppos_model_fullnoNAs.Itv.csv"))
+
+
+
+cat("df_dppos_model built. Rows:", nrow(df_dppos_model), "\n")
+
+```
+
+
+
+
+

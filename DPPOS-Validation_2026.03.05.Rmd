@@ -1,0 +1,2794 @@
+---
+title: "Transfer Learning"
+output: html_document
+date: "2025-10-31"
+---
+
+```{r setup, include=FALSE}
+
+
+knitr::opts_chunk$set(echo = TRUE)
+options(prType='html')
+seed = 42
+set.seed(seed)
+
+options(error = function(){
+  beepr::beep(3)
+})
+
+packages <- c(
+    "beepr",
+    "dplyr",
+    "data.table",
+    "knitr",
+    "foreign",
+    "tidyverse",
+    "nhanesA",
+    "xgboost",
+    "caret",
+    "viridis",
+    "pROC",
+    "ggplot2",
+    "gridExtra"
+)
+
+
+for (pkg in packages) {
+  # Check if the package is not already installed
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    # If not, install it from CRAN
+    install.packages(pkg)
+  }
+  # Load the package into the R session
+  library(pkg, character.only = TRUE)
+}
+
+
+```
+
+```{r}
+#  Defining helper functions
+
+# baseline diabetes label defined
+make_bl_diabetes_label <- function(df,
+                                  a1c = "LBXGH",
+                                  fpg = "LBXGLU",
+                                  ogt = "LBXGLT",
+                                  out = "diabetes_flag") {
+  df %>%
+    mutate(
+      has_a1c = !is.na(.data[[a1c]]),
+      has_fpg = !is.na(.data[[fpg]]),
+      has_ogt = !is.na(.data[[ogt]]),
+
+      meets_a1c = has_a1c & .data[[a1c]] >= 6.5,
+      meets_fpg = has_fpg & .data[[fpg]] >= 126,
+      meets_ogt = has_ogt & .data[[ogt]] >= 200,
+
+      any_obs  = has_a1c | has_fpg | has_ogt,
+      any_meet = meets_a1c | meets_fpg | meets_ogt,
+
+      "{out}" := case_when(
+        any_meet            ~ 1,
+        any_obs & !any_meet ~ 0,
+        TRUE                ~ NA_real_
+      )
+    )
+}
+
+# encoding for categorical variables
+# encode fit uses categorical variables from training df 
+encode_fit <- function(df, cols) {
+  maps <- lapply(cols, function(c) {
+    v <- df[[c]]
+    if (is.factor(v)) v <- as.character(v)
+    levs <- sort(unique(as.character(v)))
+    list(col = c, lut = setNames(seq_along(levs), levs))
+  })
+  names(maps) <- cols
+  maps
+}
+
+# encode apply then applies this logic to any dataframe
+encode_apply <- function(df, enc) {
+  out <- df
+  for (nm in names(enc)) {
+    m <- enc[[nm]]
+    v <- out[[m$col]]
+    if (is.factor(v)) v <- as.character(v)
+    out[[m$col]] <- unname(m$lut[as.character(v)])  # unseen variables become NA
+  }
+  out
+}
+
+# median imputing for missing values
+# impute fit computes median for each column from training data
+# impute_fit <- function(df, cols) {
+#   meds <- vapply(cols, function(c) median(df[[c]], na.rm = TRUE), numeric(1))
+#   list(medians = meds, cols = cols)
+# }
+# 
+# # applys training median to any NAs in column
+# impute_apply <- function(df, imp) {
+#   out <- df
+#   for (c in imp$cols) {
+#     out[[c]][is.na(out[[c]])] <- imp$medians[[c]]
+#   }
+#   out
+# }
+
+# preprocessing to clean data
+# # preprocessing fit to learn from training data 
+# prep_fit <- function(train_df, feature_cols,
+#                      cat_cols = c("RIAGENDR","RIDRETH1")) {
+#   cat_cols <- intersect(cat_cols, feature_cols)
+#   enc <- encode_fit(train_df, cat_cols)
+#   train_enc <- encode_apply(train_df, enc)
+#   imp <- impute_fit(train_enc, feature_cols)
+#   list(enc = enc, imp = imp, cat_cols = cat_cols)
+# }
+
+# apply to every other df 
+prep_apply_matrix <- function(df, prep, feature_cols) {
+  df2 <- df
+  if (length(prep$cat_cols) > 0) df2 <- encode_apply(df2, prep$enc)
+  df2 <- impute_apply(df2, prep$imp)
+  as.matrix(df2[, feature_cols, drop = FALSE])
+}
+
+# training xgb
+# made so training for NHANES and DPPOS is identical 
+
+
+
+# makes reproducible split for DPPOS
+# random shuffle, 80/20 split
+split_train_test <- function(df, prop = 0.8, seed = 42) {
+  set.seed(seed)
+  idx <- sample.int(nrow(df))
+  cut <- floor(prop * length(idx))
+  list(
+    train = df[idx[1:cut], , drop = FALSE],
+    test  = df[idx[(cut+1):length(idx)], , drop = FALSE]
+  )
+}
+```
+
+
+```{r New train code}
+# ==========================================
+# 2. The Upgraded Training Function
+# ==========================================
+# made so training for NHANES and DPPOS is identical, 
+# but now includes automatic tuning!
+
+train_xgb <- function(X_train, y_train, X_test, y_test, seed = 42) {
+  
+  # Convert to DMatrix format
+  dtrain <- xgb.DMatrix(data = X_train, label = y_train)
+  dtest  <- xgb.DMatrix(data = X_test,  label = y_test)
+  
+  # Define the tuning grid
+  search_grid <- expand.grid(
+    max_depth = c(3, 4, 5),
+    min_child_weight = c(1, 3),
+    subsample = c(0.8),
+    colsample_bytree = c(0.8),
+    eta = c(0.05)
+  )
+  
+  best_auc <- 0
+  best_params <- list()
+  best_nrounds <- 0
+  
+  cat("Running cross-validation to find optimal parameters...\n")
+  
+  
+  # Grid Search Loop
+  for (i in 1:nrow(search_grid)) {
+    current_params <- list(
+      objective = "binary:logistic",
+      eval_metric = "auc",
+      max_depth = search_grid$max_depth[i],
+      min_child_weight = search_grid$min_child_weight[i],
+      subsample = search_grid$subsample[i],
+      colsample_bytree = search_grid$colsample_bytree[i],
+      eta = search_grid$eta[i]
+    )
+    
+    set.seed(seed)
+    cv_results <- xgb.cv(
+      params = current_params,
+      data = dtrain,
+      nrounds = 1000, 
+      nfold = 5, 
+      early_stopping_rounds = 20, 
+      verbose = 0,
+      maximize = TRUE
+    )
+    
+    current_best_auc <- max(cv_results$evaluation_log$test_auc_mean)
+    
+    if (current_best_auc > best_auc) {
+      best_auc <- current_best_auc
+      best_params <- current_params
+      best_nrounds <- cv_results$best_iteration
+    }
+  }
+  
+  cat("Tuning complete. Best CV AUC:", round(best_auc, 4), "at", best_nrounds, "rounds.\n")
+  cat("Training final model...\n")
+  
+  # Train final model using the best discovered parameters
+  model <- xgb.train(
+    params = best_params,
+    data = dtrain,
+    nrounds = best_nrounds, # Use exact best rounds found in CV
+    watchlist = list(train = dtrain, test = dtest),
+    verbose = 0
+  )
+  
+  # Predict and evaluate on the holdout test set
+  pred <- predict(model, dtest)
+  aucv <- as.numeric(pROC::auc(y_test, pred, quiet = TRUE))
+  
+  # Return the model, predictions, AUC, AND the best parameters
+  list(model = model, pred = pred, auc = aucv, best_params = best_params)
+}
+```
+
+
+```{r Old Train code}
+# train_xgb <- function(X_train, y_train, X_test, y_test,
+#                       params = list(
+#                         objective = "binary:logistic",
+#                         eval_metric = "auc",
+#                         eta = 0.05,
+#                         max_depth = 4,
+#                         subsample = 0.8,
+#                         colsample_bytree = 0.8
+#                       ),
+#                       nrounds = 300,
+#                       verbose = 0) {
+# 
+#   dtrain <- xgb.DMatrix(X_train, label = y_train)
+#   dtest  <- xgb.DMatrix(X_test,  label = y_test)
+# 
+#  model <- xgb.train(
+#     params = params,
+#     data = dtrain,
+#     nrounds = nrounds,
+#     watchlist = list(train = dtrain, test = dtest),
+#     verbose = verbose
+#   )
+# 
+#   pred <- predict(model, dtest)
+#   aucv <- as.numeric(pROC::auc(y_test, pred, quiet = TRUE))
+# 
+#   list(model = model, pred = pred, auc = aucv)
+# }
+
+
+```
+
+
+
+
+```{r Import NHANES 1999.2001.2003 files}
+# data for 1999
+# 
+# demo_1999 <- nhanes("DEMO", 1999)
+# bmx_1999 <- nhanesA::nhanes("BMX", 1999)
+# bpx_1999 <-nhanes("BPX", 1999)
+# mcq_1999 <- nhanes("MCQ", 1999)
+# diq_1999 <- nhanes("DIQ", 1999)
+# l10_1999 <- nhanes("LAB10", 1999)
+# l10am_1999 <- nhanes("LAB10AM", 1999)
+# lb25_1999 <- nhanes("LAB25", 1999)
+# lb18_1999 <- nhanes("LAB18", 1999)
+# bpq_1999 <- nhanes("BPQ", 1999)
+# 
+# bpx_1999$BPXSY <- rowMeans(
+#   bpx_1999[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+#   na.rm = TRUE
+# )
+# 
+# bpx_1999$BPXDI <- rowMeans(
+#   bpx_1999[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+#   na.rm = TRUE
+# )
+# 
+# vars.all.1999 <- c(
+#   "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST","BMXBMI","RIDRETH1",
+#   "BMXARMC","BPXPULS","BPQ020",
+#   #"DIQ160","SLD012","DIQ180",
+#   "MCQ080","MCQ092",
+#   #"SLQ050",
+#   "DIQ010",
+#   #"DIQ170",
+#   "MCQ250C","MCQ010","MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI",
+#   "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI","LBXMPSI","LBXRBCSI","LBXHGB","LBXMC",
+#   "LBXBAPCT","LBXWBCSI","LBXRDW","LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU","LBXGLU",
+#   "LBXSCR","LBXSCA","LBXSTP","LBXSTB","LBXSAL","LBXSASSI","LBXSATSI","LBXSAPSI","LBXGH","WTSAF2YR",
+#   "WTMEC2YR"
+# )
+# 
+# df_1999 <- reduce(
+#   list(demo_1999, bmx_1999, bpx_1999, mcq_1999, diq_1999, l10_1999, l10am_1999, lb25_1999, lb18_1999, bpq_1999),
+#   full_join,
+#   by = "SEQN"
+# ) %>%
+#   select(any_of(vars.all.1999)) %>%
+#   mutate(Year = 1999)
+# 
+# 
+# 
+# # importing, adjusting, cleaning data
+# 
+# demo_2001 <- nhanesA::nhanes("DEMO_B", 2001)
+# bpx_2001 <- nhanesA::nhanes("BPX_B", 2001)
+# bmx_2001 <- nhanesA::nhanes("BMX_B", 2001)
+# l10_2001 <- nhanesA::nhanes("L10_B", 2001)
+# l10am_2001 <- nhanesA::nhanes("L10AM_B", 2001)
+# l25_2001 <- nhanesA::nhanes("L25_B", 2001)
+# l40_2001 <- nhanesA::nhanes("L40_B", 2001)
+# l40_2_2001 <- nhanesA::nhanes("L40_2_B", 2001)
+# bpq_2001 <- nhanesA::nhanes("BPQ_B", 2001)
+# diq_2001 <- nhanesA::nhanes("DIQ_B", 2001)
+# mcq_2001 <- nhanesA::nhanes("MCQ_B", 2001)
+# 
+# bpx_2001$BPXSY <- rowMeans(
+#   bpx_2001[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+#   na.rm = TRUE
+# )
+# 
+# bpx_2001$BPXDI <- rowMeans(
+#   bpx_2001[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+#   na.rm = TRUE
+# )
+# 
+# vars.all.2001 <- c(
+#   "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST","BMXBMI","RIDRETH1",
+#   "BMXARMC","BPXPULS","BPQ020", "MCQ080","MCQ092","DIQ010", "MCQ250C","MCQ010",
+#   "MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI", "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI",
+#   "LBXMPSI","LBXRBCSI","LBXHGB","LBXMC","LBXBAPCT","LBXWBCSI","LBXRDW", "LBXGLU",
+#   "LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU","LBDSCR","LBXSCA","LBXSTP","LBDSTB",
+#   "LBXSAL","LBXSASSI","LBXSATSI","LB2SAPSI","LBXGH","WTSAF2YR","WTMEC2YR"
+# )
+# 
+# df_2001 <- list(
+#   demo_2001,
+#   bpx_2001,  bmx_2001,  l10_2001, l10am_2001, l25_2001, l40_2001,
+#   l40_2_2001, bpq_2001,  diq_2001,  mcq_2001
+# ) %>%
+#   reduce(full_join, by = "SEQN")  %>%
+#   select(any_of(vars.all.2001)) %>%
+#   mutate(Year = 2001)
+# 
+# if ("LBDSCR" %in% names(df_2001)) {
+#   df_2001 <- df_2001 %>% rename(LBXSCR = LBDSCR)
+# }
+# if ("LBDSTB" %in% names(df_2001)) {
+#   df_2001 <- df_2001 %>% rename(LBXSTB = LBDSTB)
+# }
+# if ("LB2SAPSI" %in% names(df_2001)) {
+#   df_2001 <- df_2001 %>% rename(LBXSAPSI = LB2SAPSI)
+# }
+# 
+# demo_2003 <- nhanesA::nhanes("DEMO_C", 2003)
+# bpx_2003 <- nhanesA::nhanes("BPX_C", 2003)
+# bmx_2003 <- nhanesA::nhanes("BMX_C", 2003)
+# l10_2003 <- nhanesA::nhanes("L10_C", 2003)
+# l10am_2003 <- nhanesA::nhanes("L10AM_C", 2003)
+# l25_2003 <- nhanesA::nhanes("L25_C", 2003)
+# l40_2003 <- nhanesA::nhanes("L40_C", 2003)
+# bpq_2003 <- nhanesA::nhanes("BPQ_C", 2003)
+# diq_2003 <- nhanesA::nhanes("DIQ_C", 2003)
+# mcq_2003 <- nhanesA::nhanes("MCQ_C", 2003)
+# 
+# bpx_2003$BPXSY <- rowMeans(
+#   bpx_2003[, c("BPXSY1", "BPXSY2", "BPXSY3")],
+#   na.rm = TRUE
+# )
+# 
+# bpx_2003$BPXDI <- rowMeans(
+#   bpx_2003[, c("BPXDI1", "BPXDI2", "BPXDI3")],
+#   na.rm = TRUE
+# )
+# 
+# vars.all.2003 <- c(
+#   "SEQN","RIDAGEYR","RIAGENDR","BPXPLS","BPXSY","BPXDI","BMXHT","BMXWT","BMXWAIST","BMXBMI","RIDRETH1",
+#   "BMXARMC","BPXPULS","BPQ020",
+#   #"DIQ160","SLD012","DIQ180",
+#   "MCQ080","MCQ092",
+#   #"SLQ050",
+#   "DIQ010",
+#   #"DIQ170",
+#   "MCQ250C", "MCQ010","MCQ053","LBXNEPCT","LBXLYPCT","LBXMCVSI",
+#   "LBXMOPCT","LBXEOPCT","LBXPLTSI","LBXMCHSI","LBXMPSI","LBXRBCSI","LBXHGB","LBXMC",
+#   "LBXBAPCT","LBXWBCSI","LBXRDW","LBXSNASI","LBXSKSI","LBXSCLSI","LBXSC3SI","LBXSBU", "LBXGLU",
+#   "LBXSCR","LBXSCA","LBXSTP","LBXSTB","LBXSAL","LBXSASSI","LBXSATSI","LBXSAPSI","LBXGH","WTSAF2YR",
+#   "WTMEC2YR"
+# )
+# 
+# df_2003 <- list(
+#   demo_2003,
+#   bpx_2003,  bmx_2003,  l10_2003, l10am_2003, l25_2003, l40_2003,
+#   bpq_2003,  diq_2003,  mcq_2003
+# ) %>%
+#   reduce(full_join, by = "SEQN")  %>%
+#   select(any_of(vars.all.2003)) %>%
+#   mutate(Year = 2003)
+# 
+# 
+# unique_columns <- unique(c(names(df_1999), names(df_2001), names(df_2003)))
+# 
+# 
+# df_1999_final <- df_1999 %>% select(any_of(unique_columns))
+# df_2001_final <- df_2001 %>% select(any_of(unique_columns))
+# df_2003_final <- df_2003 %>% select(any_of(unique_columns))
+# 
+# df_99.04 <- bind_rows(df_1999_final, df_2001_final, df_2003_final)
+# 
+# df_99.04 %>% select(LBXGLU,Year) %>% mutate(Exist=!is.na(LBXGLU)) %>% select(Exist,Year)%>% table()
+# 
+# df_99.04 %>% select(Year, RIAGENDR) %>% table()
+# 
+# saveRDS(object = df_99.04,file = "~/Documents/NHANES-DMDx/df_99.04.rds")
+```
+
+
+```{r Load df_99.04 RDS}
+
+df_99.04 <- readRDS(file = "~/Documents/NHANES-DMDx/df_99.04.rds")
+
+```
+
+```{r}
+dim(df_99.04)
+```
+
+
+
+```{r Build Dataset 2005-2016}
+# building NHANES master dataset
+# output is df_full
+# 
+# letters <- c('D','E','F','G','H','I')
+# years   <- c(2005,2007,2009,2011,2013,2015)
+# 
+# vars <- c('DEMO','CBC','ALQ','BPQ','DIQ','MCQ',
+#                     'BPX','BPXO','GHB','BMX','SLQ','HEPA',
+#                     'HEPB_S','HEPE','FASTQX','OGTT','GLU','INS','BIOPRO','HEPBD','ALB_CR','HDL','TRIGLY','TCHOL')
+# cols <- c('BMIRECUM','MCQ240D','BPAEN1','MCQ240L','MCQ240B',
+#           'DIQ175A','DMDHHSIZ','DMDFMSIZ','DMDHHSZA','DMDHHSZB','DMDHHSZE')
+# 
+# no.var.let <- c('BPXO_D','BPXO_E','BPXO_F','BPXO_G','BPXO_H',
+#                 'DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D',
+#                 'MGX_E','MGX_F','HEPE_D','HEPE_E','INS_D',
+#                 'INS_E','INS_F','INS_G')
+# 
+# 
+# library(dplyr)
+# library(purrr)
+# 
+# 
+# fetch_and_clean <- function(var, letter, year) {
+#   var_let <- if (letter == "P") paste0(letter, "_", var) else paste0(var, "_", letter)
+#   if (var_let %in% no.var.let) return(NULL)
+# 
+#   df <- tryCatch(nhanes(var_let), error = function(e) NULL)
+#   if (is.null(df)) return(NULL)
+# 
+#   # 1. Standardize column names to uppercase (NHANES sometimes mixes cases)
+#   names(df) <- toupper(names(df))
+# 
+#   # 2. Add metadata
+#   df <- df %>% mutate(Year = year, Source_File = var_let)
+# 
+#   # 3. Specific Logic for HEPBD
+#   if (var_let %in% c("HEPBD_D", "HEPBD_E", "HEPBD_F")) {
+#     df <- df %>% mutate(LBDHD = factor(LBDHD, levels = c(1, 2), labels = c("Positive", "Negative")))
+#   }
+# 
+#   # 4. THE FIX: Force everything to character to allow binding
+#   df <- df %>% mutate(across(everything(), as.character))
+# 
+#   return(df)
+# }
+# 
+# # Run
+# 
+# final_list <- map(vars, function(v) {
+#   map2(letters, years, ~fetch_and_clean(v, .x, .y)) %>%
+#     compact() %>%
+#     bind_rows() %>%
+#     # 5. Optional: Try to convert numeric-looking columns back to double automatically
+#     type_convert(guess_integer = TRUE)
+# })
+# 
+# names(final_list) <- vars
+# final_list
+# 
+# 
+# 
+# # 1. Clean the list: Ensure SEQN and Year are present and uppercase
+# cleaned_list <- final_list %>%
+#   map(function(df) {
+#     if (is.null(df) || nrow(df) == 0) return(NULL)
+# 
+#     # Force all names to uppercase to fix seqn vs SEQN
+#     names(df) <- toupper(names(df))
+# 
+#     # Ensure "YEAR" is uppercase too (it was added manually in our previous step)
+#     if ("YEAR" %in% names(df)) {
+#       # No action needed
+#     } else if ("year" %in% names(df)) {
+#       df <- df %>% rename(YEAR = year)
+#     }
+# 
+#     # Only keep the dataframe if it actually has SEQN
+#     if (!"SEQN" %in% names(df)) {
+#       warning("A dataset is missing SEQN and will be excluded from the join.")
+#       return(NULL)
+#     }
+# 
+#     return(df)
+#   }) %>%
+#   compact() # Remove any NULLs
+# 
+# # 2. Perform the Join
+# # We join by "SEQN" and "YEAR" (now both uppercase)
+# master_df <- cleaned_list %>%
+#   reduce(full_join, by = c("SEQN", "YEAR")) %>%
+#   type_convert()
+# 
+# 
+# library(dplyr)
+# library(stringr)
+# 
+# master_df <- master_df %>%
+#   mutate(
+#     # Extract the first 4-digit number found in the text
+#     Year = as.numeric(str_extract(SDDSRVYR, "\\d{4}"))
+#   ) %>% relocate(SEQN,Year)
+
+```
+
+
+
+
+
+```{r}
+# df.all <- master_df
+# 
+# df.all <- df.all %>%
+#   mutate(
+#     BPXSY = rowMeans(select(., dplyr::any_of(c("BPXSY1","BPXSY2","BPXSY3"))), na.rm = TRUE),
+#     BPXDI = rowMeans(select(., dplyr::any_of(c("BPXDI1","BPXDI2","BPXDI3"))), na.rm = TRUE)
+#   ) %>%
+#   mutate(
+#     BPXSY = ifelse(is.nan(BPXSY), NA_real_, BPXSY),
+#     BPXDI = ifelse(is.nan(BPXDI), NA_real_, BPXDI)
+#   ) %>%
+#   select(-dplyr::any_of(c("BPXSY1","BPXSY2","BPXSY3","BPXDI1","BPXDI2","BPXDI3")))
+# 
+# df_full <- df.all
+# 
+# df_full <- df_full %>%
+#   mutate(
+#     LBXGLU = if_else(Year < 2007 & !is.na(LBXGLU), LBXGLU + 1.148, LBXGLU),
+#     LBXGLT = if_else(Year < 2007 & !is.na(LBXGLT), LBXGLT + 1.148, LBXGLT)
+#   ) %>%
+#   mutate(
+#     LBXGLU = if_else(Year < 2015 & !is.na(LBXGLU), 1.023 * LBXGLU - 0.5108, LBXGLU),
+#     LBXGLT = if_else(Year < 2015 & !is.na(LBXGLT), 1.023 * LBXGLT - 0.5108, LBXGLT),
+#     LBXSCR = if_else(Year == 2005 & !is.na(LBXSCR), -0.016 + 0.978 * LBXSCR, LBXSCR)
+#   )
+# 
+# saveRDS(object=df_full, file="~/Documents/Data/NHANES/df_nhanes_2026.01.19.Rda")
+
+df_full <-readRDS(file="~/Documents/Data/NHANES/df_nhanes_2026.01.19.Rda")
+table(df_full$Year)
+
+
+
+
+```
+
+
+
+```{r}
+dim(df_full)
+
+```
+
+
+```{r}
+# building NHANES modeling dataset (df_model1)
+
+df_model1 <- df_full %>%
+  dplyr::mutate(
+    BMI = BMXWT / ((BMXHT/100)^2),
+
+    has_a1c = !is.na(LBXGH),
+    has_fpg = !is.na(LBXGLU),
+    has_ogt = !is.na(LBXGLT),
+
+    meets_a1c = has_a1c & LBXGH  >= 6.5,
+    meets_fpg = has_fpg & LBXGLU >= 126,
+    meets_ogt = has_ogt & LBXGLT >= 200,
+
+    any_obs  = has_a1c | has_fpg | has_ogt, #### NA | NA | TRUE = TRUE; NA | NA | FALSE = FALSE
+    any_meet = meets_a1c | meets_fpg | meets_ogt, #### 
+
+    diabetes_flag = dplyr::case_when(
+      any_meet             ~ 1,
+      any_obs & !any_meet  ~ 0,
+      TRUE                 ~ NA_real_
+    )
+  ) %>%
+  dplyr::filter(!is.na(diabetes_flag)) %>%
+  dplyr::rename(
+    # Participant & Demographic Info
+    #Age = RIDAGEYR,
+    #Gender = RIAGENDR,
+
+    # Blood Pressure Examination
+    pulse = BPXPLS,
+    #reg.iregg = BPXPULS,
+    #SBP = BPXSY,
+    #DBP = BPXDI,
+
+    # Body Measures Examination
+    #Height.Stand = BMXHT,
+    #Weight = BMXWT,
+    #Waist.Circ = BMXWAIST,
+    #Arm.Circ = BMXARMC,
+
+    # Questionnaire Data
+    #BP.Ever.Told.High = BPQ020,
+    #Ever.Told.Overweight = MCQ080,
+    #TransfusionEver = MCQ092,
+    #dm.told = DIQ010,
+    #Told.Asthma = MCQ010,
+    #Anemia.Treatment = MCQ053,
+    # Cholesterol data
+    
+    # Complete Blood Count (CBC) Lab Data
+    wbc = LBXWBCSI,
+    #Lymph.Perc = LBXLYPCT,
+    #Monocyte.perc = LBXMOPCT,
+    #Seg.Neut.perc = LBXNEPCT,
+    #eosin.perc = LBXEOPCT,
+    #Baso.Perc = LBXBAPCT,
+    rbc = LBXRBCSI,
+    hg = LBXHGB,
+    mcv = LBXMCVSI,
+    #Mean.Cell.Hemoglobin = LBXMCHSI,
+    #MCHC = LBXMC,
+    RBC.Dist.Width = LBXRDW,
+    plt = LBXPLTSI,
+    #mpv = LBXMPSI,
+
+    # Standard Chemistry Panel Lab Data
+    na = LBXSNASI,
+    potas = LBXSKSI,
+    chlor = LBXSCLSI,
+    bicarb = LBXSC3SI,
+    bun = LBXSBU,
+    #cr = LBXSCR,
+    cal = LBXSCA,
+    tprot = LBXSTP,
+    alb = LBXSAL,
+    tbili = LBXSTB,
+    ast = LBXSASSI,
+    alt = LBXSATSI,
+    alp = LBXSAPSI,
+
+    # Diabetes Markers Lab Data
+    #fpg = LBXGLU,
+    #a1c = LBXGH,
+    #two = LBXGLT,
+
+    # Survey Weights
+    sample.ogtt.weight = WTSOG2YR,
+    sample.fasting.weight = WTSAF2YR,
+    sample.mec.weight = WTMEC2YR
+  ) %>% 
+  
+  dplyr::select(
+    Year,
+    RIDAGEYR, RIAGENDR, RIDRETH1, #INDFMPIR, DMDHHSIZ,
+    BMXHT, BMXWT, BMXWAIST, BPXSY, BPXDI, #BMI
+    # LBDHDD, LBXTC, LBDLDL, #cholesterol
+    LBXSCR,
+    LBXGH,      # A1C
+    LBXGLU,     # FPG
+    LBXGLT,     # OGTT (for analysis)
+    has_a1c, has_fpg, has_ogt,
+    meets_a1c, meets_fpg, meets_ogt,
+    diabetes_flag,
+    # Participant & Demographic Info
+    #Age = RIDAGEYR,
+    #Gender = RIAGENDR,
+
+    # Blood Pressure Examination
+    pulse,# = BPXPLS,
+    #reg.iregg = BPXPULS,
+    #SBP = BPXSY,
+    #DBP = BPXDI,
+
+    # Body Measures Examination
+    #Height.Stand = BMXHT,
+    #Weight = BMXWT,
+    #Waist.Circ = BMXWAIST,
+    #Arm.Circ = BMXARMC,
+
+    # Questionnaire Data
+    #BP.Ever.Told.High = BPQ020,
+    #Ever.Told.Overweight = MCQ080,
+    #TransfusionEver = MCQ092,
+    #dm.told = DIQ010,
+    #Told.Asthma = MCQ010,
+    #Anemia.Treatment = MCQ053,
+    # Cholesterol data
+    
+    # Complete Blood Count (CBC) Lab Data
+    wbc,# = LBXWBCSI,
+    #Lymph.Perc,# = LBXLYPCT,
+    #Monocyte.perc,# = LBXMOPCT,
+    #Seg.Neut.perc,# = LBXNEPCT,
+    #eosin.perc,# = LBXEOPCT,
+    #Baso.Perc,# = LBXBAPCT,
+    rbc,# = LBXRBCSI,
+    hg,# = LBXHGB,
+    mcv,# = LBXMCVSI,
+    #Mean.Cell.Hemoglobin,# = LBXMCHSI,
+    #MCHC,# = LBXMC,
+    #RBC.Dist.Width,# = LBXRDW,
+    plt,# = LBXPLTSI,
+    #mpv,# = LBXMPSI,
+
+    # Standard Chemistry Panel Lab Data
+    na,# = LBXSNASI,
+    potas,# = LBXSKSI,
+    chlor,# = LBXSCLSI,
+    bicarb,# = LBXSC3SI,
+    bun,# = LBXSBU,
+    #cr = LBXSCR,
+    cal,# = LBXSCA,
+    tprot,# = LBXSTP,
+    alb,# = LBXSAL,
+    tbili,# = LBXSTB,
+    ast,# = LBXSASSI,
+    alt,# = LBXSATSI,
+    alp,# = LBXSAPSI,
+
+    # Diabetes Markers Lab Data
+    #fpg = LBXGLU,
+    #a1c = LBXGH,
+    #two = LBXGLT,
+
+    # Survey Weights
+    sample.ogtt.weight,# = WTSOG2YR,
+    sample.fasting.weight,# = WTSAF2YR,
+    sample.mec.weight,# = WTMEC2YR
+    SEQN
+  ) %>% filter(has_a1c==TRUE & has_fpg==TRUE & has_ogt==TRUE & !is.na(sample.ogtt.weight))# %>% filter(LBXGH<6.5,LBXGLU<126)
+```
+We included people who had A1c measurements.
+
+```{r}
+df_full
+```
+
+
+```{r}
+df_model1 %>% select(diabetes_flag,has_a1c) %>% table()
+```
+
+
+```{r}
+# breakdown of how many people in df_model1 meet/don't meet diabetes criteria
+print(table(df_model1$diabetes_flag))
+# as a proportion
+print(round(prop.table(table(df_model1$diabetes_flag)), 3))
+```
+
+
+
+```{r}
+
+
+library(htmlTable)
+library(Gmisc)
+
+
+df_table <- df_model1 %>% select(
+   Year,
+    RIDAGEYR, RIAGENDR, RIDRETH1, #INDFMPIR, DMDHHSIZ,
+    BMXHT, BMXWT,  BMXWAIST, BPXSY, BPXDI, #BMI
+    # LBDHDD, LBXTC, LBDLDL, #cholesterol
+    LBXSCR,
+    LBXGH,      # A1C
+    LBXGLU,     # FPG
+    LBXGLT,     # OGTT (for analysis)
+
+    diabetes_flag,
+ 
+    pulse,# = BPXPLS,
+
+    wbc,# = LBXWBCSI,
+
+    rbc,# = LBXRBCSI,
+    hg,# = LBXHGB,
+    mcv,# = LBXMCVSI,
+
+    #RBC.Dist.Width,# = LBXRDW,
+    plt,# = LBXPLTSI,
+
+    na,# = LBXSNASI,
+    potas,# = LBXSKSI,
+    chlor,# = LBXSCLSI,
+    bicarb,# = LBXSC3SI,
+    bun,# = LBXSBU,
+    cal,# = LBXSCA,
+    tprot,# = LBXSTP,
+    alb,# = LBXSAL,
+    tbili,# = LBXSTB,
+    ast,# = LBXSASSI,
+    alt,# = LBXSATSI,
+    alp,SEQN# = LBXSAPSI,
+) %>% mutate(Type=ifelse(Year <2015,"Training","Testing"))
+
+
+df_table %>% getDescriptionStatsBy(by=Type, names(df_table),
+#`Fasting Glucose Plasma&dagger;`=fpg,				
+add_total_col = FALSE) #%>% 
+ # addHtmlTableStyle(pos.caption = "bottom") #%>% 
+  #htmlTable(caption  = "Basic descriptive statistics from the NHANES dataset",
+   #         tfoot = "&dagger; mg/dL")
+
+
+saveRDS(object = df_table,file="~/Documents/NHANES-DMDx/df_table.Rds")
+
+
+```
+
+
+```{r}
+
+df_model1 <- df_model1 %>% select(-SEQN)
+```
+
+
+```{r}
+df_model1 %>% summarise(a1c=mean(has_a1c),fpg=mean(has_fpg),two=mean(has_ogt))
+#df_model1 <- df_model1 %>% filter(!is.na(LBXGH))
+```
+
+
+```{r}
+# define feature columns 
+# does NOT include OGTT 
+# includes A1c and FPG
+
+feature_cols <-  names(df_model1)
+feature_cols <- feature_cols[!feature_cols %in% c("Year", "has_a1c", "has_fpg", "has_ogt", "meets_a1c", 
+"meets_fpg", "meets_ogt","diabetes_flag","sample.ogtt.weight","sample.fasting.weight","sample.mec.weight","LBXGLT")]
+
+feature_cols.noFPG <- feature_cols[feature_cols!="LBXGLU"]
+
+# check to make sure it is a binary outcome
+# stopifnot(length(unique(df_model1$diabetes_flag)) == 2)
+
+df_model1 <- df_model1 %>% mutate(RIDRETH1 = case_match(RIDRETH1,
+    "Non-Hispanic Black" ~ "2",
+    "Other Hispanic" ~ "3",
+    "Other Race - Including Multi-Racial" ~ "4",
+    "Non-Hispanic White" ~ "1",
+    "Mexican American" ~ "3",
+    .default = "Other"
+  ))
+
+
+
+```
+
+```{r}
+train_model1 <- df_model1 %>% dplyr::filter(Year < 2015)# %>% dplyr::filter((!is.na(LBXGH) & LBXGH<6.5))#,(!is.na(LBXGLU) & LBXGLU<126))
+test_model1  <- df_model1 %>% dplyr::filter(Year >= 2015)  #%>% dplyr::filter((!is.na(LBXGH) & LBXGH<6.5))#,(!is.na(LBXGLU) & LBXGLU<126))
+
+cat("Train participants by year:\n")
+print(table(train_model1$Year))
+
+cat ("\n")
+
+cat("Test participants by year:\n")
+print(table(test_model1$Year))
+
+cat ("\n")
+
+cat("Diabetes prevalence for training set :\n")
+print(round(prop.table(table(train_model1$diabetes_flag)), 3))
+
+cat ("\n")
+
+cat("Diabetes prevalence for test set:\n")
+print(round(prop.table(table(test_model1$diabetes_flag)), 3))
+
+
+```
+
+
+
+```{r}
+# preprocessing
+# preparing for xgboost 
+# fit on TRAIN only, apply to test and train
+
+encode_fit <- function(df, cols) {
+  maps <- lapply(cols, function(c) {
+    v <- df[[c]]
+    if (is.factor(v)) v <- as.character(v)
+    levs <- sort(unique(as.character(v)))
+    list(col = c, levels = levs, lut = setNames(seq_along(levs), levs))
+  })
+  names(maps) <- cols
+  maps
+}
+
+encode_apply <- function(df, enc) {
+  for (nm in names(enc)) {
+    m <- enc[[nm]]
+    v <- df[[m$col]]
+    if (is.factor(v)) v <- as.character(v)
+    df[[m$col]] <- unname(m$lut[as.character(v)])
+  }
+  df
+}
+
+cat_cols <- intersect(c("RIAGENDR","RIDRETH1"), feature_cols)
+
+if (length(cat_cols) > 0)
+  {
+  enc <- encode_fit(train_model1, cat_cols)
+  train_model1 <- encode_apply(train_model1, enc)
+  test_model1  <- encode_apply(test_model1,  enc)
+  }
+
+
+# impute_fit <- function(df, cols) {
+#   meds <- vapply(cols, function(c) median(df[[c]], na.rm = TRUE), numeric(1))
+#   list(medians = meds, cols = cols)
+# }
+# 
+# impute_apply <- function(df, imp) {
+#   for (c in imp$cols) {
+#     df[[c]][is.na(df[[c]])] <- imp$medians[[c]]
+#   }
+#   df
+# }
+# imputing on train
+# apply to train and test
+
+#imp <- impute_fit(train_model1, feature_cols)
+#train_model1 <- impute_apply(train_model1, imp)
+#test_model1  <- impute_apply(test_model1,  imp)
+``` 
+
+
+```{r}
+train_model1 
+test_model1 %>% summarise(a1c=mean(is.na(LBXGH)),fpg=mean(is.na(LBXGLU)))
+```
+
+```{r New A1c+ } 
+# ==========================================
+# 3. Execution for Model 1 (NHANES)
+# ==========================================
+
+# Prepare matrices using your feature columns
+X_train_mat <- as.matrix(train_model1[, feature_cols.noFPG])
+y_train_vec <- train_model1$diabetes_flag
+
+X_test_mat <- as.matrix(test_model1[, feature_cols.noFPG])
+y_test_vec <- test_model1$diabetes_flag
+
+# Call the new smart function
+results_model1 <- train_xgb(
+  X_train = X_train_mat,
+  y_train = y_train_vec,
+  X_test  = X_test_mat,
+  y_test  = y_test_vec
+)
+
+pred_prob1 <- results_model1$pred
+auc_val1 <- results_model1$auc
+xgb_model1 <- results_model1$model
+# Extract and print results
+cat("\n==========================================\n")
+cat("A1c+ NHANES Model (Internal Validation) AUC (Train=2005–2013, Test=2015) =", 
+    round(auc_val1, 3), "\n")
+cat("Parameters used:\n")
+print(results_model1$best_params)
+```
+
+
+```{r Old A1c+}
+# dtrain.1 <- xgb.DMatrix(
+#   data  = as.matrix(train_model1[, feature_cols.noFPG]),
+#   label = train_model1$diabetes_flag
+# )
+# 
+# dtest.1 <- xgb.DMatrix(
+#   data  = as.matrix(test_model1[, feature_cols.noFPG]),
+#   label = test_model1$diabetes_flag
+# )
+# 
+# params <- list(
+#   objective = "binary:logistic",
+#   eval_metric = "auc",
+#   eta = 0.05,
+#   max_depth = 4,
+#   subsample = 0.8,
+#   colsample_bytree = 0.8
+# )
+# 
+# watchlist <- list(train = dtrain.1, test = dtest.1)
+# 
+# # train model 
+# 
+# xgb_model1 <- xgb.train(
+#   params = params,
+#   data = dtrain.1,
+#   nrounds = 300,
+#   watchlist = watchlist,
+#   verbose = 0
+# )
+# 
+# pred_prob1 <- predict(xgb_model1, dtest.1)
+# 
+# # Model 1 
+# # internal validation
+# 
+# auc_val1 <- pROC::auc(test_model1$diabetes_flag, pred_prob1)
+# cat("NHANES Model (Internal Validation) AUC (Train=2005–2013, Test=2015) =",
+#     round(as.numeric(auc_val1), 3), "\n")
+
+```
+
+```{r}
+# ==========================================
+# 3. Execution for Model 1 (NHANES)
+# ==========================================
+
+# Prepare matrices using your feature columns
+X_train_mat <- as.matrix(train_model1[, feature_cols])
+y_train_vec <- train_model1$diabetes_flag
+
+X_test_mat <- as.matrix(test_model1[, feature_cols])
+y_test_vec <- test_model1$diabetes_flag
+
+# Call the new smart function
+results_model2 <- train_xgb(
+  X_train = X_train_mat,
+  y_train = y_train_vec,
+  X_test  = X_test_mat,
+  y_test  = y_test_vec
+)
+
+pred_prob2 <- results_model2$pred
+auc_val2 <- results_model2$auc
+xgb_model2 <- results_model2$model
+# Extract and print results
+cat("\n==========================================\n")
+cat("A1c/FPG+ NHANES Model (Internal Validation) AUC (Train=2005–2013, Test=2015) =", 
+    round(auc_val2, 3), "\n")
+cat("Parameters used:\n")
+print(results_model2$best_params)
+```
+
+
+```{r A1c/FPG+}
+# dtrain.2 <- xgb.DMatrix(
+#   data  = as.matrix(train_model1[, feature_cols]),
+#   label = train_model1$diabetes_flag
+# )
+# 
+# dtest.2 <- xgb.DMatrix(
+#   data  = as.matrix(test_model1[, feature_cols]),
+#   label = test_model1$diabetes_flag
+# )
+# 
+# params <- list(
+#   objective = "binary:logistic",
+#   eval_metric = "auc",
+#   eta = 0.05,
+#   max_depth = 4,
+#   subsample = 0.8,
+#   colsample_bytree = 0.8
+# )
+# 
+# watchlist <- list(train = dtrain.2, test = dtest.2)
+# 
+# # train model 
+# 
+# xgb_model2 <- xgb.train(
+#   params = params,
+#   data = dtrain.2,
+#   nrounds = 1000,
+#   early_stopping_rounds = 20,
+#   watchlist = watchlist,
+#   verbose = 0
+# )
+# 
+# pred_prob2 <- predict(xgb_model2, dtest.2)
+# 
+# # Model 1 
+# # internal validation
+# 
+# auc_val2 <- pROC::auc(test_model1$diabetes_flag, pred_prob2)
+# cat("NHANES Model (Internal Validation) AUC (Train=2005–2013, Test=2015) =",
+#     round(as.numeric(auc_val2), 3), "\n")
+
+```
+```{r}
+saveRDS(object = xgb_model1,file="~/Documents/NHANES-DMDx/xgb_model1_2026.03.05.rds")
+
+saveRDS(object = xgb_model2,file="~/Documents/NHANES-DMDx/xgb_model2_2026.03.05.rds")
+
+```
+
+
+```{r}
+# comparison with other predictors
+
+library(pROC)
+
+train_eval <- train_model1 %>% dplyr::filter(has_a1c, has_fpg)
+test_eval  <- test_model1  %>% dplyr::filter(has_a1c, has_fpg)
+
+cat("N in train_eval:", nrow(train_eval), "\n")
+cat("N in test_eval :", nrow(test_eval), "\n")
+
+#glm_a1c <- LBXGH# glm(
+#  diabetes_flag ~ LBXGH,
+#  data   = train_eval,
+#  family = binomial
+#)
+# 
+# glm_fpg <- glm(
+#   diabetes_flag ~ LBXGLU,
+#   data   = train_eval,
+#   family = binomial
+# )
+
+glm_both <- glm(
+  diabetes_flag ~ LBXGH + LBXGLU,
+  data   = train_eval,
+  family = binomial
+)
+
+
+x_mat_test1 <- as.matrix(test_eval[, feature_cols.noFPG])
+pred_xgb.1  <- predict(xgb_model1, x_mat_test1)
+
+x_mat_test2 <- as.matrix(test_eval[, feature_cols])
+pred_xgb.2  <- predict(xgb_model2, x_mat_test2)
+
+# logistic model predictions for benchmark predictors
+pred_a1c   <- test_eval$LBXGH #a1c#predict(glm_a1c,  newdata = test_eval, type = "response")
+pred_fpg   <- test_eval$LBXGLU #predict(glm_fpg,  newdata = test_eval, type = "response")
+pred_both  <- predict(glm_both, newdata = test_eval, type = "response")
+
+
+# ROC curves
+roc_xgb.1  <- pROC::roc(test_eval$diabetes_flag, pred_xgb.1,  quiet = TRUE)
+roc_xgb.2  <- pROC::roc(test_eval$diabetes_flag, pred_xgb.2,  quiet = TRUE)
+roc_a1c.nh  <- pROC::roc(test_eval$diabetes_flag, pred_a1c,  quiet = TRUE)
+roc_fpg.nh  <- pROC::roc(test_eval$diabetes_flag, pred_fpg,  quiet = TRUE)
+roc_both <- pROC::roc(test_eval$diabetes_flag, pred_both, quiet = TRUE)
+
+# AUC 
+auc_xgb.1  <- pROC::auc(roc_xgb.1)
+auc_xgb.2  <- pROC::auc(roc_xgb.2)
+auc_a1c.nh  <- pROC::auc(roc_a1c.nh)
+auc_fpg.nh  <- pROC::auc(roc_fpg.nh)
+auc_both <- pROC::auc(roc_both)
+
+cat("\nAUCs on test_eval (A1C & FPG available):\n")
+cat("  A1c+         :", round(as.numeric(auc_xgb.1),  3), "\n")
+cat("  A1c/FPG+     :", round(as.numeric(auc_xgb.2),  3), "\n")
+cat("  A1c only     :", round(as.numeric(auc_a1c.nh),  3), "\n")
+cat("  FPG only     :", round(as.numeric(auc_fpg.nh),  3), "\n")
+cat("  A1c+FPG    :", round(as.numeric(auc_both), 3), "\n")
+
+# predicting 
+
+# x_mat_test <- as.matrix(test_eval[, feature_cols.noFPG])
+# pred_xgb   <- predict(xgb_model1, x_mat_test)
+
+# making plot 
+
+plot(roc_xgb.1,
+     main = "ROC: XGBoost vs Logistic Baselines (NHANES)",
+     lwd  = 2)
+plot(roc_xgb.2, add = TRUE, lty = 5)
+plot(roc_both, add = TRUE, lty = 4)
+plot(roc_a1c.nh,  add = TRUE, lty = 2)
+plot(roc_fpg.nh,  add = TRUE, lty = 3)
+
+legend("bottomright",
+       legend = c(
+         paste0("A1c+     (AUC=", round(as.numeric(auc_xgb.1),  3), ")"),
+         paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb.2),  3), ")"),
+         paste0("Logistic: A1C + FPG (AUC=", round(as.numeric(auc_both), 3), ")"),
+         paste0("Logistic: A1C only (AUC=", round(as.numeric(auc_a1c.nh),  3), ")"),
+         paste0("Logistic: FPG only (AUC=", round(as.numeric(auc_fpg.nh),  3), ")")
+       ),
+       lty = c(1, 5, 4, 2, 3),
+       bty = "n")
+
+# this graph is only on subset of the test population that have both A1c and FPG lab data 
+# which is why AUC looks different
+```
+
+
+```{r}
+### A1c
+a1c.sn.65 <- mean(roc_a1c.nh$sensitivities[roc_a1c.nh$thresholds==6.45])
+a1c.sp.65 <- 1
+
+# Call once, store the result
+coords_a1c <- pROC::coords(roc_a1c.nh, "best", ret = c("threshold", "sensitivity", "specificity"))
+
+# Extract from the stored object
+a1c.cutoff.y <- coords_a1c[["threshold"]]
+a1c.sn.y     <- coords_a1c[["sensitivity"]]
+a1c.sp.y     <- coords_a1c[["specificity"]]
+
+### FPG
+fpg.sn.126 <- mean(roc_fpg.nh$sensitivities[roc_fpg.nh$thresholds==125.5])
+fpg.sp.126 <- 1
+
+
+# Call once, store the result
+coords_fpg <- pROC::coords(roc_fpg.nh, "best", ret = c("threshold", "sensitivity", "specificity"))
+
+# Extract from the stored object
+fpg.cutoff.y <- coords_fpg[["threshold"]]
+fpg.sn.y     <- coords_fpg[["sensitivity"]]
+fpg.sp.y     <- coords_fpg[["specificity"]]
+
+
+
+
+
+
+
+
+
+```
+
+
+
+```{r NHANES ROC GGPLOT}
+
+# Gather ROC curve data for ggplot
+roc_df <- rbind(
+  data.frame(
+    model = "A1c+",#paste0("A1c+ (AUC=", round(as.numeric(auc_xgb_eval.1), 3), ")"),
+    sensitivity = roc_xgb.1$sensitivities,
+    specificity = roc_xgb.1$specificities
+  ),
+  data.frame(
+    model = "A1c/FPG+",#paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb_eval.2), 3), ")"),
+    sensitivity = roc_xgb.2$sensitivities,
+    specificity = roc_xgb.2$specificities
+  ),
+  data.frame(
+    model = "A1c+FPG",#paste0("Logistic: A1C+FPG (AUC=", round(as.numeric(auc_af), 3), ")"),
+    sensitivity = roc_both$sensitivities,
+    specificity = roc_both$specificities
+  ),
+  data.frame(
+    model = "A1c",#paste0("A1C only (AUC=", round(as.numeric(auc_a1c), 3), ")"),
+    sensitivity = roc_a1c.nh$sensitivities,
+    specificity = roc_a1c.nh$specificities
+  ),
+  data.frame(
+    model = "FPG",#paste0("FPG only (AUC=", round(as.numeric(auc_fpg), 3), ")"),
+    sensitivity = roc_fpg.nh$sensitivities,
+    specificity = roc_fpg.nh$specificities
+  )
+)
+
+# Plot with ggplot2
+ggplot() +
+  geom_line(data=roc_df,aes(x = 1 - specificity, y = sensitivity, color = model, linetype = model),size = 1.1) +
+  labs(
+    title = "ROC: NHANES baseline diabetes (NHANES→NHANES vs logistic baselines)",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)",
+    color = "Model",
+    linetype = "Model"
+  ) + geom_point(data=data.frame(sn=fpg.sn.126,sp=1),aes(x=1-sp,y=sn),shape="square",size=4) +
+  geom_point(data=data.frame(sn=a1c.sn.65,sp=1),aes(x=1-sp,y=sn),shape="circle",size=4) +
+  theme_minimal()
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 1. Define the specific model names to match your table exactly
+# Ensure these variables (auc_xgb_eval.1, etc.) exist in your environment
+m1.nh    <- "A1c+"#paste0("A1c+ (AUC=", round(as.numeric(auc_xgb_eval.1), 3), ")")
+m2.nh    <- "A1c/FPG+"#paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb_eval.2), 3), ")")
+m_both  <- "A1c+FPG"#paste0("Logistic: A1C+FPG (AUC=", round(as.numeric(auc_af), 3), ")")
+m_a1c.nh <- "A1c"#paste0("A1C only (AUC=", round(as.numeric(auc_a1c), 3), ")")
+m_fpg.nh <- "FPG"#paste0("FPG only (AUC=", round(as.numeric(auc_fpg), 3), ")")
+
+
+roc_df_thinned <- roc_df %>%
+  group_by(model) %>%
+  # Apply a condition: if it's m1, take every 5th point; otherwise, keep all
+  filter(if (cur_group()$model == m1.nh) row_number() %% 10 == 0 else TRUE) %>%
+  ungroup() %>%
+  group_by(model) %>%
+  mutate(
+    # Create a row index for the specific group
+    row_idx = row_number(),
+    # Create a flag: keep if specificity < 1 OR if it's every 50th row when spec == 1
+    keep_flag = ifelse(specificity < 1, 
+                       TRUE, 
+                       (row_idx %% 30 == 0 | row_idx == 1))
+  ) %>%
+  filter(keep_flag) %>%
+  ungroup() %>%
+  select(-row_idx, -keep_flag)
+
+
+# 2. Build the Plot
+p.roc.nh <- ggplot(roc_df_thinned , aes(x = 1 - specificity, y = sensitivity, group = model,shape=model)) +
+  # Lines: A1c/FPG+ is solid, A1c+ is dashed
+  geom_line(aes(linetype = model,color=model), size = 1) +
+  
+  # Points: Thin out the points to avoid a "blob" line
+  # Using dplyr::slice explicitly to avoid the error
+  geom_point(data = roc_df_thinned  %>%  filter(model %in% c(m_a1c.nh, m_fpg.nh))%>%
+               dplyr::group_by(model) %>%
+               dplyr::slice(seq(1, n(), by = 2)),
+             aes(shape = model,color=model), size = 2) +
+  # Manual Styling
+  scale_linetype_manual(values = setNames(
+    c("twodash", "solid", "dotted", "solid", "solid"), 
+    c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh)
+  )) +
+  scale_shape_manual(values = setNames(
+    c(NA, NA, NA, 16, 15), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+    c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh)
+  )) +
+  scale_color_manual(values = setNames(
+    c('black','grey10', 'darkgrey', 'grey', 'grey'), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+    c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh)
+  )) +  
+  # scale_fill_manual(values = setNames(
+  #   c('black','black', 'darkgrey', 'grey', 'grey'), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+  #   c(m1, m2, m_af, m_a1c, m_fpg)
+  # )) +  
+  # Specific Markers for preselected thresholds
+  # A1C 6.5 (Circle) and FPG 126 (Square)
+  geom_point(data = data.frame(sn = a1c.sn.65, sp = 1), 
+             aes(x = 1 - sp, y = sn),color='grey', shape = 16, size = 5, inherit.aes = FALSE) +
+  geom_point(data = data.frame(sn = fpg.sn.126, sp = 1), 
+             aes(x = 1 - sp, y = sn),color='grey', shape = 15, size = 5, inherit.aes = FALSE) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+               color = "grey", linetype = "longdash", size = 0.1,
+               inherit.aes = FALSE) +
+  # Labels and Greyscale Theme
+  labs(
+    title = "ROC: NHANES Internal Validation",
+    #subtitle = "Comparing ML Models against Clinical Cutoffs (A1c 6.5%, FPG 126 mg/dL)",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)",
+    linetype = "Model", shape = "Model",color="Model",
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.box = "vertical"
+  );print(p.roc.nh)
+```
+
+```{r}
+# Install if you haven't yet
+# install.packages("dcurves")
+library(dcurves)
+library(dplyr)
+library(tidyr)
+
+
+# We already have logit_af (A1C+FPG) and p_hat_af
+# Let's create simple models for A1C only and FPG only to get their probabilities
+logit_a1c <- glm(diabetes_flag ~ LBXGH, family = binomial, data = test_eval)
+logit_fpg <- glm(diabetes_flag ~ LBXGLU, family = binomial, data = test_eval)
+
+# Add all probability predictors to the evaluation dataframe
+dca_data <- test_eval %>%
+  mutate(
+    p_a1c.nh = predict(logit_a1c, type = "response"),
+    p_fpg.nh = predict(logit_fpg, type = "response"),
+    p_af.nh  = pred_both,           # Already calculated in your code
+    p_xgb.nh.1 = pred_xgb.1,            # Assuming this is already a 0-1 probability
+    p_xgb.nh.2 = pred_xgb.2            # Assuming this is already a 0-1 probability
+    
+  )
+
+# Calculate Net Benefit
+dca_results <- dca_data %>%
+  as.data.frame() %>%
+  dca(diabetes_flag ~ p_a1c.nh + p_fpg.nh + p_af.nh + p_xgb.nh.1 + p_xgb.nh.2,
+      data = .,
+      label = list(p_a1c.nh = "A1c only", 
+                   p_fpg.nh = "FPG only", 
+                   p_af.nh  = "A1c+FPG", 
+                   p_xgb.nh.1 = "A1c+",
+                   p_xgb.nh.2 = "A1c/FPG+"))
+
+# Plot using ggplot2 syntax
+library(ggplot2)
+
+dca_results %>%
+  plot(smooth = TRUE) +
+  scale_x_continuous(limits = c(0, 0.5)) + # Often helpful to zoom in on low thresholds
+  labs(title = "Decision Curve Analysis: NHANES Baseline Diabetes",
+       x = "Threshold Probability",
+       y = "Net Benefit") +
+  theme_minimal()
+```
+
+```{r}
+#To align your DCA plot with your ROC plot, we need to convert the dcurves object into a tibble so we can use standard ggplot2 scales. The plot() function in dcurves is a wrapper that doesn't easily allow for the complex manual overrides (like setNames) you used in your ROC code.
+
+#Here is the modified DCA code to ensure perfect consistency between your accuracy (ROC) and clinical utility (DCA) figures.
+#Modified DCA Workflow
+#R
+
+library(dcurves)
+library(tidyr)
+
+
+# 1. Calculate Net Benefit for fixed thresholds
+# Using the Sensitivity and Specificity we calculated earlier
+# Formula: NB = Sn * Prevalence - (1 - Sp) * Prevalence * (p / (1-p))
+
+prevalence <- mean(dca_data$diabetes_flag == 1)
+
+# Function to calculate NB for a fixed point across all thresholds
+calc_fixed_nb <- function(sn, sp, threshold_p) {
+  sn * prevalence - (1 - sp) * (1 - prevalence) * (threshold_p / (1 - threshold_p))
+}
+
+# Create a data frame for these lines
+threshold_range <- seq(0.01, 0.3, by = 0.01)
+
+fixed_lines_df <- bind_rows(
+  tibble(
+    threshold = threshold_range,
+    net_benefit = calc_fixed_nb(a1c.sn.65, a1c.sp.65, threshold),
+    model_label = m_a1c.nh, # Matching your legend labels
+    type = "Fixed Cutoff (6.5%)"
+  ),
+  tibble(
+    threshold = threshold_range,
+    net_benefit = calc_fixed_nb(fpg.sn.126, fpg.sp.126, threshold),
+    model_label = m_fpg.nh, # Matching your legend labels
+    type = "Fixed Cutoff (126 mg/dL)"
+  )
+)
+
+# 1. Calculate Net Benefit as you did
+dca_results <- dca_data %>%
+  as.data.frame() %>%
+  dca(diabetes_flag ~ p_a1c.nh + p_fpg.nh + p_af.nh + p_xgb.nh.1 + p_xgb.nh.2,
+      data = .,
+      label = list(p_a1c.nh = "A1c only", 
+                   p_fpg.nh = "FPG only", 
+                   p_af.nh  = "A1c+FPG", 
+                   p_xgb.nh.1 = "A1c+",
+                   p_xgb.nh.2 = "A1c/FPG+"))
+
+# 2. Convert to a dataframe for custom ggplotting
+# This allows us to use your specific m1, m2 labels and scales
+dca_df <- as_tibble(dca_results) %>%
+  filter(!variable %in% c("all", "none")) %>%
+  mutate(model_label = case_when(
+    label == "A1c+" ~ m1.nh,
+    label == "A1c/FPG+" ~ m2.nh,
+    label == "A1c+FPG" ~ m_both,
+    label == "A1c only" ~ m_a1c.nh,
+    label == "FPG only" ~ m_fpg.nh
+  ))
+
+# Separate All/None for the background lines
+dca_base <- as_tibble(dca_results) %>% 
+  filter(variable %in% c("all", "none"))
+
+# 1. Update the base labels
+dca_base <- dca_base %>%
+  mutate(label = case_when(
+    variable == "all" ~ "Test All",
+    variable == "none" ~ "Test None",
+    TRUE ~ label
+  ))
+
+# 2. Build the Plot with smarter label placement
+p.dca.nh <- ggplot() +
+  # Background Reference Lines & Labels
+  geom_line(data = dca_base, aes(x = threshold, y = net_benefit, group = label), 
+            color = "grey60", size = 0.8) +
+  geom_text(data = dca_base %>% filter(variable == "none", threshold == 0.45), 
+            aes(x = threshold, y = net_benefit, label = label),
+            vjust = -1, color = "grey60", size = 3.5, fontface = "italic") +
+  geom_text(data = dca_base %>% filter(variable == "all", threshold == 0.15), 
+            aes(x = threshold+0.01, y = net_benefit, label = label),
+            vjust = -1, color = "grey60", size = 3.5, fontface = "italic") +
+  
+  # FIXED THRESHOLD LINES (Now dot-dashed with Labels)
+  geom_line(data = fixed_lines_df, aes(x = threshold, y = net_benefit, 
+                                       color = model_label), 
+            linetype = "dotdash", size = 0.6, alpha = 0.7) +
+  
+  # Add labels for A1c >= 6.5 and FPG >= 126
+  # Placed at threshold 0.35 to avoid the dense 0-0.20 region
+  geom_text(data = fixed_lines_df %>% 
+              mutate(clean_label = ifelse(type == "Fixed Cutoff (6.5%)", "A1c \u2265 6.5", "FPG \u2265 126")) %>%
+              filter(threshold == 0.03),
+            aes(x = threshold, y = net_benefit-0.01, label = clean_label, color = model_label),
+            vjust = -1, size = 3, show.legend = FALSE) +
+
+  # CONTINUOUS MODEL LINES (Main Curves)
+  geom_line(data = dca_df, aes(x = threshold, y = net_benefit, 
+                               color = model_label, linetype = model_label), size = 1) +
+  
+  # Model Points (Every 5th)
+  geom_point(data = dca_df %>% group_by(model_label) %>% dplyr::slice(seq(1, n(), by = 5)),
+             aes(x = threshold, y = net_benefit, 
+                 color = model_label, shape = model_label), size = 2) +
+  
+  # Use existing scales
+  scale_linetype_manual(values = setNames(c("twodash", "solid", "dotted", "solid", "solid"), 
+                                          c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh))) +
+  scale_shape_manual(values = setNames(c(NA, NA, NA, 16, 15), 
+                                       c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh))) +
+  scale_color_manual(values = setNames(c('black','grey10', 'darkgrey', 'grey', 'grey'), 
+                                       c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh))) +
+  
+  coord_cartesian(xlim = c(0, 0.3), ylim = c(-0.01, max(dca_df$net_benefit, na.rm=T) * 1.1)) +
+  labs(title = "DCA: NHANES Internal Validation",
+       x = "Threshold Probability", y = "Net Benefit",
+       color = "Model", shape = "Model", linetype = "Model") +
+  theme_minimal() +
+  theme(legend.position = "bottom", legend.box = "vertical", legend.key.width = unit(3, "line"),
+        panel.grid.minor = element_blank()); print(p.dca.nh)
+```
+
+```{r}
+library(tidyverse)
+library(pROC)
+
+
+get_roc_stats <- function(roc_obj, model_name) {
+  # 1. Get the best coordinates
+  best_coords <- pROC::coords(roc_obj, "best", ret = c("threshold", "sensitivity", "specificity"), transpose = TRUE)
+
+  # 3. Format into a clean row
+  tibble(
+    Model = model_name,
+    AUC = round(as.numeric(pROC::auc(roc_obj)),2),
+    Threshold = best_coords["threshold"],
+    # Format as "Value (95% CI: Low - High)"
+    Sensitivity = paste0(round(best_coords["sensitivity"], 2)),
+    Specificity = paste0(round(best_coords["specificity"], 2))
+  )
+}
+
+
+get_roc_stats_with_ci <- function(roc_obj, model_name) {
+  # 1. Get the best coordinates
+  best_coords <- pROC::coords(roc_obj, "best", ret = c("threshold", "sensitivity", "specificity"), transpose = TRUE)
+  
+  # 2. Calculate Confidence Intervals for Sn and Sp at that best threshold
+  # Note: boot.n = 2000 is standard for publication
+  cis <- pROC::ci.coords(roc_obj, x = best_coords["threshold"], 
+                         input = "threshold", 
+                         ret = c("sensitivity", "specificity"),
+                         boot.n = 100)
+  
+  # 3. Format into a clean row
+  tibble(
+    Model = model_name,
+    AUC = round(as.numeric(pROC::auc(roc_obj)),2),
+    Threshold = best_coords["threshold"],
+    # Format as "Value (95% CI: Low - High)"
+    Sensitivity = paste0(round(best_coords["sensitivity"], 2), " (", 
+                         round(cis$sensitivity[1], 2), "-", 
+                         round(cis$sensitivity[3], 2), ")"),
+    Specificity = paste0(round(best_coords["specificity"], 2), " (", 
+                         round(cis$specificity[1], 2), "-", 
+                         round(cis$specificity[3], 2), ")")
+  )
+}
+
+roc_list <- list(
+  "A1c+ (NHANES→NHANES)" = roc_xgb.1,
+  "A1c/FPG+ (NHANES→NHANES)" = roc_xgb.2,
+  "A1C + FPG (Logistic)"    = roc_both,
+  "A1C Only"               = roc_a1c.nh,
+  "FPG Only"               = roc_fpg.nh
+)
+
+
+get_fixed_stats <- function(roc_obj, model_name, threshold) {
+  # Get Sn and Sp at exactly your threshold
+  coords <- pROC::coords(roc_obj, x = threshold, input = "threshold", 
+                         ret = c("sensitivity", "specificity"), transpose = TRUE)
+  
+ 
+  
+  tibble(
+    Model = model_name,
+    AUC = round(as.numeric(pROC::auc(roc_obj)),2),
+    Threshold = threshold,
+    Sensitivity = paste0(round(coords["sensitivity"], 2)),
+    Specificity = paste0(round(coords["specificity"], 2)),
+    Type = "Preselected"
+  )
+}
+# Helper for manual/fixed thresholds (like A1C = 6.5)
+get_fixed_stats_with_ci <- function(roc_obj, model_name, threshold) {
+  # Get Sn and Sp at exactly your threshold
+  coords <- pROC::coords(roc_obj, x = threshold, input = "threshold", 
+                         ret = c("sensitivity", "specificity"), transpose = TRUE)
+  
+  # Bootstrapped CIs
+  cis <- pROC::ci.coords(roc_obj, x = threshold, input = "threshold", 
+                         ret = c("sensitivity", "specificity"), boot.n = 100)
+  
+  tibble(
+    Model = model_name,
+    AUC = round(as.numeric(pROC::auc(roc_obj)),2),
+    Threshold = threshold,
+    Sensitivity = paste0(round(coords["sensitivity"], 2), " (", 
+                         round(cis$sensitivity[1], 2), "-", round(cis$sensitivity[3], 2), ")"),
+    Specificity = paste0(round(coords["specificity"], 2), " (", 
+                         round(cis$specificity[1], 2), "-", round(cis$specificity[3], 2), ")"),
+    Type = "Preselected"
+  )
+}
+
+# 1. Run stats for XGBoost (Optimal)
+tab_xgb.1 <- get_roc_stats(roc_xgb.1, "A1c+") %>% mutate(Type = "Optimal")
+tab_xgb.2 <- get_roc_stats(roc_xgb.2, "A1c/FPG+") %>% mutate(Type = "Optimal")
+tab_af <- get_roc_stats(roc_both, "A1c+FPG") %>% mutate(Type = "Optimal")
+tab_a1c <- get_roc_stats(roc_a1c.nh, "A1c") %>% mutate(Type = "Optimal")
+tab_fpg <- get_roc_stats(roc_fpg.nh, "FPG") %>% mutate(Type = "Optimal")
+
+
+# 2. Run stats for your preselected lab values
+
+tab_a1c.fixed <- get_fixed_stats(roc_a1c.nh, "A1C \u2265 6.5", threshold = 6.45)
+tab_a1c.fixed$AUC <- NA
+tab_fpg.fixed <- get_fixed_stats(roc_fpg.nh, "FPG \u2265 126", threshold = 125.5)
+tab_fpg.fixed$AUC <- NA
+
+
+# Combine
+final_comparison_table.noCI.nh <- bind_rows(tab_xgb.2, tab_af, tab_fpg, tab_fpg.fixed, tab_xgb.1,tab_a1c, tab_a1c.fixed)
+print(final_comparison_table.noCI.nh)
+
+# 1. Run stats for XGBoost (Optimal)
+tab_xgb.1 <- get_roc_stats_with_ci(roc_xgb.1, "A1c+") %>% mutate(Type = "Optimal")
+tab_xgb.2 <- get_roc_stats_with_ci(roc_xgb.2, "A1c/FPG+") %>% mutate(Type = "Optimal")
+tab_af <- get_roc_stats_with_ci(roc_both, "A1c+FPG") %>% mutate(Type = "Optimal")
+tab_a1c <- get_roc_stats_with_ci(roc_a1c.nh, "A1c") %>% mutate(Type = "Optimal")
+tab_fpg <- get_roc_stats_with_ci(roc_fpg.nh, "FPG") %>% mutate(Type = "Optimal")
+
+
+# 2. Run stats for your preselected lab values
+tab_a1c.fixed <- get_fixed_stats_with_ci(roc_a1c.nh, "A1C \u2265 6.5", threshold = 6.45)
+tab_a1c.fixed$AUC <- NA
+tab_fpg.fixed <- get_fixed_stats_with_ci(roc_fpg.nh, "FPG \u2265 126", threshold = 125.5)
+tab_fpg.fixed$AUC <- NA
+
+# Combine
+final_comparison_table.nh <- bind_rows(tab_xgb.2, tab_af, tab_fpg, tab_fpg.fixed, tab_xgb.1,tab_a1c, tab_a1c.fixed)
+print(final_comparison_table.nh)
+```
+
+
+
+
+
+
+```{r LOAD DPPOS}
+# load DPPOS here and apply the preprocessing (impute and encode)
+
+library(pROC)
+
+
+df_dppos_model <- readRDS("~/Documents/Data/DPPOS_V6/New/df_dppos_model_full.rds")
+cat("Rows in raw DPPOS model df:", nrow(df_dppos_model), "\n")
+
+
+# can change this to df_dppos_aligned <- test_dppos_raw
+# if we want to only look at the DPPOS test set for calculating ROC 
+
+### Add empty cols
+diff.cols <- setdiff(feature_cols.noFPG,names(df_dppos_model))
+new.cols<-diff.cols[!diff.cols %in% c("Year", "has_a1c", "has_fpg", "has_ogt", "meets_a1c", 
+"meets_fpg", "meets_ogt","BMI")]
+
+df_dppos_model[new.cols]<- NA
+
+
+df_dppos_aligned <- df_dppos_model
+
+# cat_cols <- intersect(c("RIAGENDR","RIDRETH1"), feature_cols.noFPG)
+# if (length(cat_cols) > 0) {
+#   df_dppos_aligned <- encode_apply(df_dppos_aligned, enc)
+# }
+
+#df_dppos_aligned <- impute_apply(df_dppos_aligned, imp)
+saveRDS(object = df_dppos_aligned,file="~/Documents/NHANES-DMDx/df_dppos_aligned.rds")
+```
+
+
+```{r DPPOS FILTER A1c}
+#df_dppos_aligned <- df_dppos_aligned %>% filter(LBXGH<6.5, LBXGLU <126)
+```
+
+```{r}
+# df_dppos_aligned %>% summarise(two =sum(LBXGLT<200,na.rm=TRUE))
+# 
+# df_dppos_aligned %>% ggplot() + geom_point(aes(x=LBXGH,y=LBXGLU,color=LBXGLT))
+```
+
+
+```{r}
+
+
+
+# predict on DPPOS using NHANES-trained XGBoost
+
+x_mat_dppos.1     <- as.matrix(df_dppos_aligned[, feature_cols.noFPG])
+pred_prob_dppos.1 <- predict(xgb_model1, x_mat_dppos.1)
+df_dppos_aligned$pred_xgb.1 <- pred_prob_dppos.1
+
+
+x_mat_dppos.2    <- as.matrix(df_dppos_aligned[, feature_cols])
+pred_prob_dppos.2 <- predict(xgb_model2, x_mat_dppos.2)
+df_dppos_aligned$pred_xgb.2 <- pred_prob_dppos.2
+
+```
+
+
+
+```{r}
+
+#  DPPOS baseline lab-defined diabetes label (same rule as NHANES)
+
+df_dppos_aligned <- df_dppos_aligned %>%
+  mutate(
+    has_a1c = !is.na(LBXGH),
+    has_fpg = !is.na(LBXGLU),
+    has_ogt = !is.na(LBXGLT),
+
+    meets_a1c = has_a1c & LBXGH  >= 6.5,
+    meets_fpg = has_fpg & LBXGLU >= 126,
+    meets_ogt = has_ogt & LBXGLT >= 200,
+
+    any_obs  = has_a1c | has_fpg | has_ogt,
+    any_meet = meets_a1c | meets_fpg | meets_ogt,
+
+    diabetes_flag_bl = case_when(
+      any_meet            ~ 1,
+      any_obs & !any_meet ~ 0,
+      TRUE                ~ NA_real_
+    )
+  )
+
+has_bl <- !is.na(df_dppos_aligned$diabetes_flag_bl)
+cat("DPPOS rows with baseline label:", sum(has_bl), "of", nrow(df_dppos_aligned), "\n")
+
+```
+
+```{r}
+# Evaluate DPPOS using NHANES training predictions (XGBoost)
+
+roc_dppos_bl_xgb.1 <- pROC::roc(
+  response  = df_dppos_aligned$diabetes_flag_bl[has_bl],
+  predictor = df_dppos_aligned$pred_xgb.1[has_bl],
+  quiet     = TRUE
+)
+
+auc_dppos_bl_xgb.1 <- pROC::auc(roc_dppos_bl_xgb.1)
+cat("A1c+ NHANES→DPPOS AUC     =", round(as.numeric(auc_dppos_bl_xgb.1), 3), "\n")
+
+
+roc_dppos_bl_xgb.2 <- pROC::roc(
+  response  = df_dppos_aligned$diabetes_flag_bl[has_bl],
+  predictor = df_dppos_aligned$pred_xgb.2[has_bl],
+  quiet     = TRUE
+)
+
+auc_dppos_bl_xgb.2 <- pROC::auc(roc_dppos_bl_xgb.2)
+cat("A1c/FPG+ NHANES→DPPOS AUC =", round(as.numeric(auc_dppos_bl_xgb.2), 3), "\n")
+
+```
+
+```{r}
+# Baseline benchmarks on same labeled DPPOS rows + ROC curves
+dppos_bl_eval <- df_dppos_aligned[has_bl, ]
+
+# Restrict to only people with both labs 
+dppos_bl_eval <- dppos_bl_eval %>% filter(has_a1c , has_fpg) ### HERE
+
+# A1C 
+just_a1c <- dppos_bl_eval$LBXGH
+p_hat_a1c <- just_a1c
+roc_a1c   <- pROC::roc(dppos_bl_eval$diabetes_flag_bl, p_hat_a1c, quiet = TRUE)
+auc_a1c   <- pROC::auc(roc_a1c)
+
+
+# FPG 
+just_fpg <- dppos_bl_eval$LBXGLU
+p_hat_fpg <- just_fpg
+roc_fpg   <- pROC::roc(dppos_bl_eval$diabetes_flag_bl, p_hat_fpg, quiet = TRUE)
+auc_fpg   <- pROC::auc(roc_fpg)
+
+# A1C + FPG logistic regression 
+logit_af <- glm_both#glm(diabetes_flag ~ LBXGH + LBXGLU, family = binomial, data = train_eval) #train_eval
+pred_hat_af  <- predict(logit_af, newdata = dppos_bl_eval, type = "response")
+
+p_hat_af <- pred_hat_af
+roc_af   <- pROC::roc(dppos_bl_eval$diabetes_flag_bl, pred_hat_af, quiet = TRUE)
+auc_af   <- pROC::auc(roc_af)
+
+# A1c+ XGBoost ROC
+roc_xgb_eval.1 <- pROC::roc(
+  response  = dppos_bl_eval$diabetes_flag_bl,
+  predictor = dppos_bl_eval$pred_xgb.1,
+  quiet     = TRUE
+)
+auc_xgb_eval.1 <- pROC::auc(roc_xgb_eval.1)
+
+
+
+# A1c/FPG+ XGBoost ROC
+roc_xgb_eval.2 <- pROC::roc(
+  response  = dppos_bl_eval$diabetes_flag_bl,
+  predictor = dppos_bl_eval$pred_xgb.2,
+  quiet     = TRUE
+)
+auc_xgb_eval.2 <- pROC::auc(roc_xgb_eval.2)
+
+cat("DPPOS baseline AUCs (same eval rows):\n")
+cat("  A1c+ (NHANES→DPPOS):", round(as.numeric(auc_xgb_eval.1), 3), "\n")
+cat("  A1c/FPG+ (NHANES→DPPOS):", round(as.numeric(auc_xgb_eval.2), 3), "\n")
+cat("  Logistic: A1C only     :", round(as.numeric(auc_a1c), 3), "\n")
+cat("  Logistic: FPG only     :", round(as.numeric(auc_fpg), 3), "\n")
+cat("  Logistic: (NHANES→DPPOS) A1C + FPG    :", round(as.numeric(auc_af), 3), "\n")
+
+# Plot all ROC curves
+plot(
+  roc_xgb_eval.1,
+  main = "ROC: DPPOS baseline diabetes (NHANES→DPPOS vs logistic baselines)",
+  lwd  = 2, ,xlim=c(1,0)
+)
+plot(roc_xgb_eval.2,  add = TRUE, lty = 5,,xlim=c(1,0))
+plot(roc_af,  add = TRUE, lty = 4,,xlim=c(1,0))
+plot(roc_a1c, add = TRUE, lty = 2,,xlim=c(1,0))
+plot(roc_fpg, add = TRUE, lty = 3,xlim=c(1,0))
+
+legend(
+  "bottomright",
+  legend = c(
+    paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb_eval.2), 3), ")"),
+    paste0("Logistic: A1C+FPG (AUC=", round(as.numeric(auc_af), 3), ")"),
+    paste0("Logistic: FPG only (AUC=", round(as.numeric(auc_fpg), 3), ")"),
+    paste0("A1c+ (AUC=", round(as.numeric(auc_xgb_eval.1), 3), ")"),    
+    paste0("Logistic: A1C only (AUC=", round(as.numeric(auc_a1c), 3), ")")    
+  ),
+  lty = c(1, 5, 4, 2, 3),
+  bty = "n"
+)
+
+
+```
+```{r}
+saveRDS(object = roc_xgb_eval.2,file="~/Dropbox/NHANES manuscript/rox_xgb_eval.2.rds")
+summary(roc_xgb_eval.2)
+
+length(roc_xgb_eval.2$sensitivities)
+```
+
+```{r}
+### A1c
+a1c.sn.65 <- mean(roc_a1c$sensitivities[roc_a1c$thresholds==6.45])
+a1c.sp.65 <- 1
+
+# Call once, store the result
+coords_a1c <- pROC::coords(roc_a1c, "best", ret = c("threshold", "sensitivity", "specificity"))
+
+# Extract from the stored object
+a1c.cutoff.y <- coords_a1c[["threshold"]]
+a1c.sn.y     <- coords_a1c[["sensitivity"]]
+a1c.sp.y     <- coords_a1c[["specificity"]]
+
+### FPG
+fpg.sn.126 <- mean(roc_fpg$sensitivities[roc_fpg$thresholds==125.5])
+fpg.sp.126 <- 1
+
+
+# Call once, store the result
+coords_fpg <- pROC::coords(roc_fpg, "best", ret = c("threshold", "sensitivity", "specificity"))
+
+# Extract from the stored object
+fpg.cutoff.y <- coords_fpg[["threshold"]]
+fpg.sn.y     <- coords_fpg[["sensitivity"]]
+fpg.sp.y     <- coords_fpg[["specificity"]]
+
+
+
+
+
+
+
+
+```
+
+
+
+```{r}
+library(tidyverse)
+library(pROC)
+
+
+
+
+roc_list <- list(
+  "A1c+ (NHANES→DPPOS)" = roc_xgb_eval.1,
+  "A1c/FPG+ (NHANES→DPPOS)" = roc_xgb_eval.2,
+  "A1C + FPG (Logistic)"    = roc_af,
+  "A1C Only"               = roc_a1c,
+  "FPG Only"               = roc_fpg
+)
+#######
+
+
+
+# 1. Run stats for XGBoost (Optimal)
+tab_xgb.1 <- get_roc_stats(roc_xgb_eval.1, "A1c+") %>% mutate(Type = "Optimal")
+tab_xgb.2 <- get_roc_stats(roc_xgb_eval.2, "A1c/FPG+") %>% mutate(Type = "Optimal")
+tab_af <- get_roc_stats(roc_af, "A1c+FPG") %>% mutate(Type = "Optimal")
+tab_a1c <- get_roc_stats(roc_a1c, "A1c") %>% mutate(Type = "Optimal")
+tab_fpg <- get_roc_stats(roc_fpg, "FPG") %>% mutate(Type = "Optimal")
+
+
+# 2. Run stats for your preselected lab values
+tab_a1c.fixed <- get_fixed_stats(roc_a1c, "A1C \u2265 6.5", threshold = 6.45)
+tab_a1c.fixed$AUC <- NA
+tab_fpg.fixed <- get_fixed_stats(roc_fpg, "FPG \u2265 126", threshold = 125.5)
+tab_fpg.fixed$AUC <- NA
+
+# Combine
+final_comparison_table.noCI.dp <- bind_rows(tab_xgb.2, tab_af, tab_fpg, tab_fpg.fixed, tab_xgb.1,tab_a1c, tab_a1c.fixed)
+print(final_comparison_table.noCI.dp)
+
+# 1. Run stats for XGBoost (Optimal)
+tab_xgb.1 <- get_roc_stats_with_ci(roc_xgb_eval.1, "A1c+") %>% mutate(Type = "Optimal")
+tab_xgb.2 <- get_roc_stats_with_ci(roc_xgb_eval.2, "A1c/FPG+") %>% mutate(Type = "Optimal")
+tab_af <- get_roc_stats_with_ci(roc_af, "A1c+FPG") %>% mutate(Type = "Optimal")
+tab_a1c <- get_roc_stats_with_ci(roc_a1c, "A1c") %>% mutate(Type = "Optimal")
+tab_fpg <- get_roc_stats_with_ci(roc_fpg, "FPG") %>% mutate(Type = "Optimal")
+
+
+# 2. Run stats for your preselected lab values
+tab_a1c.fixed <- get_fixed_stats_with_ci(roc_a1c, "A1C \u2265 6.5", threshold = 6.45)
+tab_a1c.fixed$AUC <- NA
+tab_fpg.fixed <- get_fixed_stats_with_ci(roc_fpg, "FPG \u2265 126", threshold = 125.5)
+tab_fpg.fixed$AUC <- NA
+
+# Combine
+final_comparison_table.dp <- bind_rows(tab_xgb.2, tab_af, tab_fpg, tab_fpg.fixed, tab_xgb.1,tab_a1c, tab_a1c.fixed)
+print(final_comparison_table.dp)
+
+
+```
+
+
+
+
+
+
+
+```{r}
+# Gather ROC curve data for ggplot
+roc_df <- rbind(
+  data.frame(
+    model = "A1c+",#paste0("A1c+ (AUC=", round(as.numeric(auc_xgb_eval.1), 3), ")"),
+    sensitivity = roc_xgb_eval.1$sensitivities,
+    specificity = roc_xgb_eval.1$specificities
+  ),
+  data.frame(
+    model = "A1c/FPG+",#paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb_eval.2), 3), ")"),
+    sensitivity = roc_xgb_eval.2$sensitivities,
+    specificity = roc_xgb_eval.2$specificities
+  ),
+  data.frame(
+    model = "A1c+FPG",#paste0("Logistic: A1C+FPG (AUC=", round(as.numeric(auc_af), 3), ")"),
+    sensitivity = roc_af$sensitivities,
+    specificity = roc_af$specificities
+  ),
+  data.frame(
+    model = "A1c",#paste0("A1C only (AUC=", round(as.numeric(auc_a1c), 3), ")"),
+    sensitivity = roc_a1c$sensitivities,
+    specificity = roc_a1c$specificities
+  ),
+  data.frame(
+    model = "FPG",#paste0("FPG only (AUC=", round(as.numeric(auc_fpg), 3), ")"),
+    sensitivity = roc_fpg$sensitivities,
+    specificity = roc_fpg$specificities
+  )
+)
+
+# Plot with ggplot2
+ggplot() +
+  geom_line(data=roc_df %>% 
+              mutate(model = factor(model,
+                                       levels=c("A1c/FPG+","A1c+FPG","FPG","A1c+","A1c"))),aes(x = 1 - specificity, y = sensitivity, color = model),size = 1.1) +
+  labs(
+    title = "External Validation",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)",
+    color = "Model",
+    linetype = "Model"
+  ) + geom_point(data=data.frame(sn=fpg.sn.126,sp=1),aes(x=1-sp,y=sn),color="purple",shape="square",size=4) +
+  geom_point(data=data.frame(sn=a1c.sn.65,sp=1),aes(x=1-sp,y=sn),color="darkgreen",shape="circle",size=4) +
+  scale_color_manual(values=
+                       c("A1c" = "red", 
+                         "A1c/FPG+" = "blue", 
+                         "A1c+" = "darkgreen", 
+                         "A1c+FPG" = "orange",
+                         "FPG" = "purple")) + 
+  theme_minimal() + theme.1
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+# 1. Define the specific model names to match your table exactly
+# Ensure these variables (auc_xgb_eval.1, etc.) exist in your environment
+m1    <- "A1c+"#paste0("A1c+ (AUC=", round(as.numeric(auc_xgb_eval.1), 3), ")")
+m2    <- "A1c/FPG+"#paste0("A1c/FPG+ (AUC=", round(as.numeric(auc_xgb_eval.2), 3), ")")
+m_af  <- "A1c+FPG"#paste0("Logistic: A1C+FPG (AUC=", round(as.numeric(auc_af), 3), ")")
+m_a1c <- "A1c"#paste0("A1C only (AUC=", round(as.numeric(auc_a1c), 3), ")")
+m_fpg <- "FPG"#paste0("FPG only (AUC=", round(as.numeric(auc_fpg), 3), ")")
+
+
+roc_df_thinned <- roc_df %>%
+  group_by(model) %>%
+  # Apply a condition: if it's m1, take every 5th point; otherwise, keep all
+  filter(if (cur_group()$model == m1) row_number() %% 10 == 0 else TRUE) %>%
+  ungroup() %>%
+  group_by(model) %>%
+  mutate(
+    # Create a row index for the specific group
+    row_idx = row_number(),
+    # Create a flag: keep if specificity < 1 OR if it's every 50th row when spec == 1
+    keep_flag = ifelse(specificity < 1, 
+                       TRUE, 
+                       (row_idx %% 20 == 0 | row_idx ==1))
+  ) %>%
+  filter(keep_flag) %>%
+  ungroup() %>%
+  select(-row_idx, -keep_flag)
+
+# 2. Build the Plot
+p.roc.dp <- ggplot(roc_df_thinned, aes(x = 1 - specificity, y = sensitivity, group = model,shape=model)) +
+  # Lines: A1c/FPG+ is solid, A1c+ is dashed
+  geom_line(aes(linetype = model,color=model), size = 1) +
+  
+  # Points: Thin out the points to avoid a "blob" line
+  # Using dplyr::slice explicitly to avoid the error
+  geom_point(data = roc_df_thinned,
+             aes(shape = model,color=model), size = 2) +
+  # Manual Styling
+  scale_linetype_manual(values = setNames(
+    c("twodash", "solid", "dotted", "solid", "solid"), 
+    c(m1, m2, m_af, m_a1c, m_fpg)
+  )) +
+  scale_shape_manual(values = setNames(
+    c(NA, NA, NA, 16, 15), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+    c(m1, m2, m_af, m_a1c, m_fpg)
+  )) +
+  scale_color_manual(values = setNames(
+    c('black','grey10', 'darkgrey', 'grey', 'grey'), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+    c(m1, m2, m_af, m_a1c, m_fpg)
+  )) +  
+  # scale_fill_manual(values = setNames(
+  #   c('black','black', 'darkgrey', 'grey', 'grey'), # 16=circle (A1c), 15=square (FPG), 17=triangle (AF)
+  #   c(m1, m2, m_af, m_a1c, m_fpg)
+  # )) +  
+  # Specific Markers for preselected thresholds
+  # A1C 6.5 (Circle) and FPG 126 (Square)
+  geom_point(data = data.frame(sn = a1c.sn.65, sp = 1), 
+             aes(x = 1 - sp, y = sn),color='grey', shape = 16, size = 5, inherit.aes = FALSE) +
+  geom_point(data = data.frame(sn = fpg.sn.126, sp = 1), 
+             aes(x = 1 - sp, y = sn),color='grey', shape = 15, size = 5, inherit.aes = FALSE) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+               color = "grey", linetype = "longdash", size = 0.1,
+               inherit.aes = FALSE) +  
+  # Labels and Greyscale Theme
+  labs(
+    title = "ROC: DPPOS External Validation",
+    #subtitle = "Comparing ML Models against Clinical Cutoffs (A1c 6.5%, FPG 126 mg/dL)",
+    x = "1 - Specificity (False Positive Rate)",
+    y = "Sensitivity (True Positive Rate)",
+    linetype = "Model", shape = "Model",color="Model",
+  ) +
+  theme_minimal() +
+  theme(
+    panel.grid.minor = element_blank(),
+    legend.position = "bottom",
+    legend.box = "vertical"
+  );print(p.roc.dp)
+```
+
+
+```{r}
+roc_df_thinned %>% 
+  filter(model == "A1c/FPG+") %>%
+  count()
+```
+
+
+
+```{r}
+# Install if you haven't yet
+# install.packages("dcurves")
+library(dcurves)
+library(dplyr)
+library(tidyr)
+
+
+# We already have logit_af (A1C+FPG) and p_hat_af
+# Let's create simple models for A1C only and FPG only to get their probabilities
+logit_a1c <- glm(diabetes_flag_bl ~ LBXGH, family = binomial, data = dppos_bl_eval)
+logit_fpg <- glm(diabetes_flag_bl ~ LBXGLU, family = binomial, data = dppos_bl_eval)
+
+# Add all probability predictors to the evaluation dataframe
+dca_data <- dppos_bl_eval %>%
+  mutate(
+    p_a1c = predict(logit_a1c, type = "response"),
+    p_fpg = predict(logit_fpg, type = "response"),
+    p_af  = p_hat_af,           # Already calculated in your code
+    p_xgb.1 = pred_xgb.1,            # Assuming this is already a 0-1 probability
+    p_xgb.2 = pred_xgb.2            # Assuming this is already a 0-1 probability
+    
+  )
+
+# Calculate Net Benefit
+dca_results <- dca_data %>%
+  as.data.frame() %>%
+  dca(diabetes_flag_bl ~ p_a1c + p_fpg + p_af + p_xgb.1 + p_xgb.2,
+      data = .,
+      label = list(p_a1c = "A1C only", 
+                   p_fpg = "FPG only", 
+                   p_af  = "A1C + FPG", 
+                   p_xgb.1 = "A1c+",
+                   p_xgb.2 = "A1c/FPG+"))
+
+# Plot using ggplot2 syntax
+library(ggplot2)
+
+dca_results %>%
+  plot(smooth = TRUE) +
+  scale_x_continuous(limits = c(0, 0.5)) + # Often helpful to zoom in on low thresholds
+  labs(title = "Decision Curve Analysis: DPPOS Baseline Diabetes",
+       x = "Threshold Probability",
+       y = "Net Benefit") +
+  theme_minimal()
+```
+
+```{r}
+#To align your DCA plot with your ROC plot, we need to convert the dcurves object into a tibble so we can use standard ggplot2 scales. The plot() function in dcurves is a wrapper that doesn't easily allow for the complex manual overrides (like setNames) you used in your ROC code.
+
+#Here is the modified DCA code to ensure perfect consistency between your accuracy (ROC) and clinical utility (DCA) figures.
+#Modified DCA Workflow
+#R
+
+library(dcurves)
+library(tidyr)
+
+
+# 1. Calculate Net Benefit for fixed thresholds
+# Using the Sensitivity and Specificity we calculated earlier
+# Formula: NB = Sn * Prevalence - (1 - Sp) * Prevalence * (p / (1-p))
+
+prevalence <- mean(dca_data$diabetes_flag_bl == 1)
+
+# Function to calculate NB for a fixed point across all thresholds
+calc_fixed_nb <- function(sn, sp, threshold_p) {
+  sn * prevalence - (1 - sp) * (1 - prevalence) * (threshold_p / (1 - threshold_p))
+}
+
+# Create a data frame for these lines
+threshold_range <- seq(0.01, 0.3, by = 0.01)
+
+fixed_lines_df <- bind_rows(
+  tibble(
+    threshold = threshold_range,
+    net_benefit = calc_fixed_nb(a1c.sn.65, a1c.sp.65, threshold),
+    model_label = m_a1c, # Matching your legend labels
+    type = "Fixed Cutoff (6.5%)"
+  ),
+  tibble(
+    threshold = threshold_range,
+    net_benefit = calc_fixed_nb(fpg.sn.126, fpg.sp.126, threshold),
+    model_label = m_fpg, # Matching your legend labels
+    type = "Fixed Cutoff (126 mg/dL)"
+  )
+)
+
+# 1. Calculate Net Benefit as you did
+dca_results <- dca_data %>%
+  as.data.frame() %>%
+  dca(diabetes_flag_bl ~ p_a1c + p_fpg + p_af + p_xgb.1 + p_xgb.2,
+      data = .,
+      label = list(p_a1c = "A1C only", 
+                   p_fpg = "FPG only", 
+                   p_af  = "A1C + FPG", 
+                   p_xgb.1 = "A1c+",
+                   p_xgb.2 = "A1c/FPG+"))
+
+# 2. Convert to a dataframe for custom ggplotting
+# This allows us to use your specific m1, m2 labels and scales
+dca_df <- as_tibble(dca_results) %>%
+  filter(!variable %in% c("all", "none")) %>%
+  mutate(model_label = case_when(
+    label == "A1c+" ~ m1,
+    label == "A1c/FPG+" ~ m2,
+    label == "A1C + FPG" ~ m_af,
+    label == "A1C only" ~ m_a1c,
+    label == "FPG only" ~ m_fpg
+  ))
+
+# Separate All/None for the background lines
+dca_base <- as_tibble(dca_results) %>% 
+  filter(variable %in% c("all", "none"))
+
+# 1. Update the base labels
+dca_base <- dca_base %>%
+  mutate(label = case_when(
+    variable == "all" ~ "Test All",
+    variable == "none" ~ "Test None",
+    TRUE ~ label
+  ))
+
+# 2. Build the Plot with smarter label placement
+p.dca.dp <- ggplot() +
+  # Background Reference Lines & Labels
+  geom_line(data = dca_base, aes(x = threshold, y = net_benefit, group = label), 
+            color = "grey60", size = 0.8) +
+  geom_text(data = dca_base %>% filter(variable == "none", threshold == 0.25), 
+            aes(x = threshold, y = net_benefit, label = label),
+            vjust = -1, color = "grey60", size = 3.5, fontface = "italic") +
+  geom_text(data = dca_base %>% filter(variable == "all", threshold == 0.20), 
+            aes(x = threshold+0.01, y = net_benefit, label = label),
+            vjust = -1, color = "grey60", size = 3.5, fontface = "italic") +
+  
+  # FIXED THRESHOLD LINES (Now dot-dashed with Labels)
+  geom_line(data = fixed_lines_df, aes(x = threshold, y = net_benefit, 
+                                       color = model_label), 
+            linetype = "dotdash", size = 0.6, alpha = 0.7) +
+  
+  # Add labels for A1c >= 6.5 and FPG >= 126
+  # Placed at threshold 0.35 to avoid the dense 0-0.20 region
+  geom_text(data = fixed_lines_df %>% 
+              mutate(clean_label = ifelse(type == "Fixed Cutoff (6.5%)", "A1c \u2265 6.5", "FPG \u2265 126")) %>%
+              filter(threshold == 0.03),
+            aes(x = threshold, y = net_benefit-0.02, label = clean_label, color = model_label),
+            vjust = -1, size = 3, show.legend = FALSE) +
+
+  # CONTINUOUS MODEL LINES (Main Curves)
+  geom_line(data = dca_df, aes(x = threshold, y = net_benefit, 
+                               color = model_label, linetype = model_label), size = 1) +
+  
+  # Model Points (Every 5th)
+  geom_point(data = dca_df %>% group_by(model_label) %>% dplyr::slice(seq(1, n(), by = 5)),
+             aes(x = threshold, y = net_benefit, 
+                 color = model_label, shape = model_label), size = 2) +
+  
+  # Use existing scales
+  scale_linetype_manual(values = setNames(c("twodash", "solid", "dotted", "solid", "solid"), 
+                                          c(m1, m2, m_af, m_a1c, m_fpg))) +
+  scale_shape_manual(values = setNames(c(NA, NA, NA, 16, 15), 
+                                       c(m1, m2, m_af, m_a1c, m_fpg))) +
+  scale_color_manual(values = setNames(c('black','grey10', 'darkgrey', 'grey', 'grey'), 
+                                       c(m1, m2, m_af, m_a1c, m_fpg))) +
+  
+  coord_cartesian(xlim = c(0, 0.3), ylim = c(-0.01, max(dca_df$net_benefit, na.rm=T) * 1.1)) +
+  labs(title = "DCA: DPPOS External Validation",
+       x = "Threshold Probability", y = "Net Benefit",
+       color = "Model", shape = "Model", linetype = "Model") +
+  theme_minimal() + 
+  theme(legend.position = "bottom", legend.box = "vertical", legend.key.width = unit(3, "line"),
+        panel.grid.minor = element_blank());print(p.dca.dp)
+```
+
+
+
+
+```{r}
+library(patchwork)
+
+
+
+# Define common scales to ensure perfect merging
+# 1. Force the plots to have the same scales (crucial for collection)
+common_scales.nh <- list(
+  scale_color_manual(name = "Model", values = setNames(c('black','grey10', 'darkgrey', 'grey', 'grey'), c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh))),
+  scale_linetype_manual(name = "Model", values = setNames(c("twodash", "solid", "dotted", "solid", "solid"), c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh))),
+  scale_shape_manual(name = "Model", values = setNames(c(NA, NA, NA, 16, 15), c(m1.nh, m2.nh, m_both, m_a1c.nh, m_fpg.nh)))
+)
+
+common_scales.dp <- list(
+  scale_color_manual(name = "Model", values = setNames(c('black','grey10', 'darkgrey', 'grey', 'grey'), c(m1, m2, m_af, m_a1c ,m_fpg))),
+  scale_linetype_manual(name = "Model", values = setNames(c("twodash", "solid", "dotted", "solid", "solid"), c(m1, m2, m_af, m_a1c ,m_fpg))),
+  scale_shape_manual(name = "Model", values = setNames(c(NA, NA, NA, 16, 15), c(m1, m2, m_af, m_a1c ,m_fpg)))
+)
+
+# Apply scales to objects
+pa <- p.roc.nh + common_scales.nh
+pb <- p.dca.nh + common_scales.nh
+pc <- p.roc.dp + common_scales.dp
+pd <- p.dca.dp + common_scales.dp
+
+# 2. Design the Layout
+# We create a 3-row layout: 
+# Row 1: A | B
+# Row 2: C | D
+# Row 3: The Legend (guide_area)
+final_layout <- (pa + pb) / (pc + pd) / guide_area() + 
+  plot_layout(
+    guides = 'collect', 
+    heights = c(1, 1, 0.3) # Makes the legend row shorter than the plots
+  ) +
+  plot_annotation(tag_levels = 'A') & 
+  theme(
+    legend.position = "bottom",
+    legend.box = "vertical",
+    legend.key.width = unit(3, "line"),
+    plot.tag = element_text(face = "bold")
+  ) & theme(legend.direction = "horizontal", legend.box = "horizontal")
+
+# Display the result
+final_layout
+
+```
+```{r}
+library(cowplot)
+# Extract legend from the NHANES plot
+shared_legend <- get_legend(pa + theme(legend.position = "bottom"))
+
+# Create the grid without legends
+main_grid <- plot_grid(pa + theme(legend.position="none"), 
+                       pb + theme(legend.position="none"), 
+                       pc + theme(legend.position="none"), 
+                       pd + theme(legend.position="none"), 
+                       ncol = 2, labels = "AUTO")
+
+# Add the legend back at the bottom
+final_plot <- plot_grid(main_grid, shared_legend, ncol = 1, rel_heights = c(1, 0.2))
+```
+
+
+
+```{r}
+# Yes, embedding tables directly into the plot area (the "insets" approach) is a common way to save vertical space in high-impact journals. It makes the figure feel more integrated and avoids the "wall of text" look below the graphs.
+# 
+# To do this, we use annotation_custom(). This allows us to treat your tableGrob as a layer within the plot itself.
+# 1. Update the Plot Objects with Embedded Tables
+# 
+# We will place the tables in the bottom-right corner of the ROC plots (A and C). Since ROC plots are usually "empty" in that bottom-right quadrant (low sensitivity, high specificity), it’s the perfect spot.
+# R
+
+library(grid)
+library(gridExtra)
+# 1. Update theme slightly for legibility (0.2mm is too tight for print)
+inset_table_theme <- ttheme_default(
+  base_size = 8,
+  core = list(
+    bg_params = list(fill = "white", col = "white"), 
+    fg_params = list(hjust = 0, x = 0.1),
+    padding.x = unit(1, "mm"), 
+    padding.y = unit(1, "mm") 
+  ),
+  colhead = list(
+    bg_params = list(fill = "white", col = "white"),
+    fg_params = list(fontface = "bold", hjust = 0, x = 0.1),
+    padding.x = unit(1, "mm"),
+    padding.y = unit(1, "mm")
+  )
+)
+
+# Function to create the table grob
+make_inset_table <- function(df) {
+  tableGrob(df %>% select(Model, AUC, Sensitivity, Specificity), 
+            rows = NULL, theme = inset_table_theme)
+}
+
+# 2. Re-create and Insert with tighter coordinates
+table_a <- make_inset_table(final_comparison_table.noCI.nh)
+table_c <- make_inset_table(final_comparison_table.noCI.dp)
+
+p_a_with_table <- pa +  
+  annotation_custom(table_a, xmin = 0.32, xmax = 0.9, ymin = 0.05, ymax = 0.62)
+
+p_c_with_table <- pc +  
+  annotation_custom(table_c, xmin = 0.32, xmax = 0.9, ymin = 0.05, ymax = 0.62)
+
+
+library(cowplot)
+
+
+# Arrange the 4 panels
+main_grid <- plot_grid(
+  p_a_with_table + theme(legend.position = "none"),
+  pb + theme(legend.position = "none"),
+  p_c_with_table + theme(legend.position = "none"),
+  pd + theme(legend.position = "none"),
+  ncol = 2, nrow = 2,
+  labels = "AUTO", label_size = 14, label_fontface = "bold",
+  align = 'vh'
+)
+
+# Update the shared legend before the final save
+shared_legend <- get_legend(
+  p_a_with_table + 
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 13, face = "bold"),
+    legend.key.width = unit(3.5, "line"),
+    # NEW: White background styling
+    legend.background = element_rect(fill = "white", color = "white"), 
+    legend.key = element_rect(fill = "white", color = NA),
+    legend.margin = margin(6, 6, 6, 6) # Adds a little internal padding
+  ) +
+  guides(
+    color = guide_legend(nrow = 2, byrow = TRUE),
+    linetype = guide_legend(nrow = 2, byrow = TRUE),
+    shape = guide_legend(nrow = 2, byrow = TRUE)
+  )
+)
+
+# Re-assemble one last time
+final_figure <- plot_grid(
+  main_grid, 
+  shared_legend, 
+  ncol = 1, 
+  rel_heights = c(1, 0.07) # Increased to 0.2 for the 2-row legend
+) ;print(final_figure)
+```
+
+
+```{r}
+# Adjusted height to 9.5in to accommodate the larger legend and tables
+ggsave("~/Dropbox/NHANES manuscript/Figure1_Final_Sub.tiff", 
+       plot = final_figure, 
+       width = 7, 
+       height = 9.5, 
+       units = "in", 
+       dpi = 300, 
+       scale = 1,
+       compression = "lzw")
+```
+
+
+```{r}
+dppos_bl_eval %>% select(diabetes_flag_bl,meets_fpg) %>% filter(meets_fpg==TRUE,diabetes_flag_bl==1) %>% nrow() / dppos_bl_eval %>% filter(diabetes_flag_bl==1) %>% nrow()
+
+
+```
+
+
+```{r Shap Build A1c+}
+
+contr.full <- predict(xgb_model1, dtest.1, predcontrib = TRUE)
+shap.dat.full<-xgb.plot.shap(as.matrix(test_model1[,feature_cols.noFPG]), contr.full, model = xgb_model1, top_n = 20, n_col = 5)
+
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+
+feature_cols
+renamed_labels <- c( 'LBXGLU' = 'FPG',
+                                      'LBXGH' = 'A1c',
+                                      'BPXSY' = 'Systolic BP',
+
+                                      'BMXWAIST' = 'Waist Circ.',
+ 
+                                      'BPXDI' = 'Diastolic BP',
+   
+                                      'LBXSCR' = 'Creatinine',
+  
+                     'DMDHHSIZ' = '# in Household',
+                     'RIDRETH1' = "Race/Ethnicity",
+                     'RIAGENDR' = "Gender",
+                     "INDFMPIR" = "Poverty Ratio",
+                     "RIDAGEYR" = "Age",
+                     "LBDHDD"   = "HDL", 
+                     "LBXTC"    = "Total Chol.", 
+                     "LBDLDL"   = "LDL",
+                     "hg" = "Hemoglobin",
+                     "tbili" = "Total Bili.",
+                     "BMXHT" = "Height",
+                     "tprot" = "Total Prot.",
+                     "ast" = "AST",
+                     "alt" = "ALT",
+                     "mcv" = "MCV",
+                     "potas" = "Potassium",
+                     "pulse" = "Heart Rate",
+                     "wbc" = "WBC count",
+                     "cal" = "Calcium",
+                     "rbc" = "RBC count",
+                     "chlor" = "Chloride",
+                     "alp" = "Alk. Phos.",
+                     "BMXWT" = "Weight",
+                     "plt" = "Platelets",
+                     "bicarb" = "Bicarbonate"
+                     
+                    )
+
+
+
+
+sn.shap.nh <-xgb.ggplot.shap.summary(as.matrix(test_model1[,feature_cols.noFPG]), contr.full, model = xgb_model1, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels) +
+  ylab("SHAP value") + labs(color="Feature\nvalue")  + theme.1 +  labs(tag="A") + 
+   scale_color_gradient(low="black",high="white",limits=c(-10,10),breaks=c(-10,10),labels=c('Low','High'),na.value = 'black')  + theme(legend.position =c(.75,.35),
+                              plot.tag=element_text(size=8),
+                              axis.text=element_text(size=8),
+                              axis.title=element_text(size=8),
+                              legend.text = element_text(size=8),
+                              legend.title = element_text(size=8),
+                              legend.key.size = unit(.05, "in"), 
+                              plot.title = element_text(hjust = 0.5,size=8)) + theme_bw();print(sn.shap.nh)
+
+###############
+d.dppos.1 <- xgb.DMatrix(
+  data  = as.matrix(df_dppos_aligned[, feature_cols.noFPG]),
+  label = df_dppos_aligned$diabetes_flag
+)
+contr.full.dp.1 <- predict(xgb_model1, d.dppos.1, predcontrib = TRUE)
+
+sn.shap.dp <-xgb.ggplot.shap.summary(as.matrix(df_dppos_aligned[,feature_cols.noFPG]), contr.full.dp.1, model = xgb_model1, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels) +
+  ylab("SHAP value") + labs(color="Feature\nvalue")  + theme.1 +  labs(tag="A") + 
+  scale_color_gradient(low="black",high="white",limits=c(-10,10),breaks=c(-10,10),labels=c('Low','High'),na.value = 'black')  + theme(legend.position =c(.75,.35),
+                              plot.tag=element_text(size=8),
+                              axis.text=element_text(size=8),
+                              axis.title=element_text(size=8),
+                              legend.text = element_text(size=8),
+                              legend.title = element_text(size=8),
+                              legend.key.size = unit(.05, "in"), 
+                              plot.title = element_text(hjust = 0.5,size=8))+ theme_bw();print(sn.shap.dp)
+
+#ggsave(sn.shap,filename="~/Dropbox/Narula_Shap.png",width=1.83,height=1.55,units=c("in"))
+
+
+```
+
+
+
+```{r Shap Build A1c/FPG+}
+
+contr.full <- predict(xgb_model2, dtest.2, predcontrib = TRUE)
+shap.dat.full<-xgb.plot.shap(as.matrix(test_model1[,feature_cols]), contr.full, model = xgb_model2, top_n = 20, n_col = 5)
+
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+
+feature_cols
+
+sn.shap.nh.2 <-xgb.ggplot.shap.summary(as.matrix(test_model1[,feature_cols]), contr.full, model = xgb_model2, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels) +
+  ylab("SHAP value") + labs(color="Feature\nvalue")  + theme.1 +  labs(tag="A") + 
+   scale_color_gradient(low="black",high="white",limits=c(-10,10),breaks=c(-10,10),labels=c('Low','High'),na.value = 'black')  + theme(legend.position =c(.75,.35),
+                              plot.tag=element_text(size=8),
+                              axis.text=element_text(size=8),
+                              axis.title=element_text(size=8),
+                              legend.text = element_text(size=8),
+                              legend.title = element_text(size=8),
+                              legend.key.size = unit(.05, "in"), 
+                              plot.title = element_text(hjust = 0.5,size=8)) + theme_bw();print(sn.shap.nh.2)
+
+###############
+d.dppos.2 <- xgb.DMatrix(
+  data  = as.matrix(df_dppos_aligned[, feature_cols]),
+  label = df_dppos_aligned$diabetes_flag
+)
+contr.full.dp.2 <- predict(xgb_model2, d.dppos.2, predcontrib = TRUE)
+
+sn.shap.dp.2 <-xgb.ggplot.shap.summary(as.matrix(df_dppos_aligned[,feature_cols]), contr.full.dp.2, model = xgb_model2, top_n = 20) + 
+  scale_x_discrete("Feature",labels=renamed_labels) +
+  ylab("SHAP value") + labs(color="Feature\nvalue")  + theme.1 +  labs(tag="A") + 
+  scale_color_gradient(low="black",high="white",limits=c(-10,10),breaks=c(-10,10),labels=c('Low','High'),na.value = 'black')  + theme(legend.position =c(.75,.35),
+                              plot.tag=element_text(size=8),
+                              axis.text=element_text(size=8),
+                              axis.title=element_text(size=8),
+                              legend.text = element_text(size=8),
+                              legend.title = element_text(size=8),
+                              legend.key.size = unit(.05, "in"), 
+                              plot.title = element_text(hjust = 0.5,size=8))+ theme_bw();print(sn.shap.dp.2)
+
+#ggsave(sn.shap,filename="~/Dropbox/Narula_Shap.png",width=1.83,height=1.55,units=c("in"))
+
+
+```
+
+
+
+
+
+
+```{r}
+library(patchwork)
+library(scales)
+# Define the shared sqrt scale and theme adjustments
+# We use trans = "sqrt" to handle the dominant top feature
+shared_scales <- list(
+  # Use modulus transformation (lambda = 0.5 is square root)
+  # This handles negative and positive values symmetrically
+  scale_y_continuous("SHAP value (Impact on Prediction)", 
+                     trans = modulus_trans(0.5), 
+                     breaks = c(-9, -4, -1, 0, 1, 4, 9, 16)), 
+  
+  scale_color_gradient(low="black", high="grey80", 
+                       limits=c(-5,5), breaks=c(-5,5), 
+                       labels=c('Low','High'), na.value = 'black'),
+  theme_bw(),
+  theme(
+    axis.text = element_text(size = 8),
+    axis.title = element_text(size = 8)
+  )
+)
+
+# Apply scales and remove labels from the "Right" panels (B and D)
+p_a <- sn.shap.nh   + shared_scales + labs(title = "NHANES A1c+ Validation")
+p_b <- sn.shap.dp   + shared_scales + labs(title = "DPPOS A1c+ Validation") + 
+       theme(axis.text.y = element_blank(), axis.title.y = element_blank(), axis.ticks.y = element_blank())
+
+p_c <- sn.shap.nh.2 + shared_scales + labs(title = "NHANES A1c/FPG+ Validation")
+p_d <- sn.shap.dp.2 + shared_scales + labs(title = "DPPOS A1c/FPG+ Validation") + 
+       theme(axis.text.y = element_blank(), axis.title.y = element_blank(), axis.ticks.y = element_blank())
+
+
+
+# Combine the four plots
+# ( (A | B) / (C | D) ) 
+final_shap_grid <- ( (p_a | p_b) / (p_c | p_d) ) + 
+  plot_layout(
+    guides = "collect", 
+    widths = c(1.3, 1) # This forces the internal plotting areas to align
+  ) + 
+  plot_annotation(
+    tag_levels = 'A',
+    title = "SHAP Summary of Predictive Features"#,
+    #subtitle = "Top Row: A1c+ | Bottom Row: A1c/FPG+"
+  ) & 
+  theme(
+    legend.position = "right",
+    plot.tag = element_text(face = "bold", size = 12)
+  )
+
+# Display
+print(final_shap_grid)
+
+ggsave("~/Dropbox/NHANES manuscript/Figure2_SHAP_4Panel.tiff", 
+       final_shap_grid, 
+       width = 7, height = 9, 
+       units = "in", dpi = 300, compression = "lzw")
+```
+
+
+
+
+
+```{r}
+theme.1 <- theme(axis.text=element_text(size=8),
+            axis.title=element_text(size=12),
+            plot.tag.position = c(0.01,0.99),
+            plot.tag = element_text(size=20),
+            plot.title = element_text(hjust = 0.5,size=18)) 
+
+office_test <- data.frame(pred_prob2,diabetes_flag = test_model1$diabetes_flag)
+plt.calibration.quantile<- office_test %>%  mutate(bin=cut_number(pred_prob2, n = 20)) %>% group_by(bin) %>% reframe(med=median(pred_prob2),freq=sum(diabetes_flag==TRUE)/sum(!is.na(diabetes_flag))) %>% ggplot() + geom_point(aes(x=med,y=freq)) + geom_line(data=data.frame(x=c(0,1),y=c(0,1)),aes(x=x,y=y),linetype="dashed") +  geom_rug(data=office_test,aes(x=pred_prob2,y=as.integer(diabetes_flag)),alpha=0.6) + xlab("Median of Probaility Quantile") + ylab("Frequency of Diabetes Diagnosis") + xlim(0,1) + ylim(0,1) + ggtitle("Frequency of Diagnosis by Quantile for A1c/FPG+ Model") + theme.1; plot(plt.calibration.quantile)
+
+ggsave(file="~/Dropbox/NHANES manuscript/a1cfpg-calibrationplot.tiff",plot=plt.calibration.quantile)
+```
+
+
+```{r}
+glm_both
+```
+
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(dplyr)
+
+# 1. Create a dense grid of values for both variables
+# We use small steps to make the heatmap look smooth
+hba1c_seq <- seq(from = 5.6, to = 6.5, by = 0.1)     # HbA1c range
+glucose_seq <- seq(from = 110, to = 126, by = 1)       # Fasting Glucose range
+
+# 2. Generate all possible combinations of these values
+heatmap_data <- expand.grid(LBXGH = hba1c_seq, LBXGLU = glucose_seq)
+
+# 3. Predict the probability for every single combination on the grid
+# Assuming your model is still named 'my_model'
+heatmap_data$predicted_prob <- predict(glm_both, newdata = heatmap_data, type = "response")
+
+# 4. Plot the heatmap
+plt.a1cfpg.heat <- ggplot(heatmap_data, aes(x = LBXGH, y = LBXGLU, fill = predicted_prob)) +
+  geom_tile() +
+  # Using a color gradient where low risk is blue and high risk is red
+  scale_fill_gradient2(
+    low = "#4575b4", mid = "#ffffbf", high = "#d73027", 
+    midpoint = 0.5, # Centers the yellow color right at the 50% probability mark
+    name = "Probability\n(0 to 1)"
+  ) +
+  labs(
+    title = "Heatmap of Predicted Diabetes Probability",
+    subtitle = "Risk transitions from blue (low) to red (high)",
+    x = "Hemoglobin A1c (%)",
+    y = "Fasting Plasma Glucose (mg/dL)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "right"
+  );plot(plt.a1cfpg.heat)
+
+ggsave(plot=plt.a1cfpg.heat,filename = "~/Dropbox/NHANES manuscript/A1cFPG-Heatmap.tiff",width=7,height=7,units=c("in"))
+```
+
+
+```{r}
+
+
+
+```
+
+
+
+```{r}
+beep()
+```
+
