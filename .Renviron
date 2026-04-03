@@ -1,0 +1,2 @@
+PATH=/opt/homebrew/bin:${PATH}
+PKG_CONFIG_PATH=/opt/homebrew/lib/pkgconfig:/opt/homebrew/share/pkgconfig
