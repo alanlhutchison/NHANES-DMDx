@@ -1,7 +1,7 @@
 ---
 title: "Mortality"
 output: html_document
-date: "2025-07-16"
+date: "2026-04-02"
 ---
 
 
@@ -31,9 +31,22 @@ packages <- c(
   "gridExtra",
   #"flextable",
   #"cairo",
-  "officer"
-  
+  "officer",
+  "ragg",
+  "ggsurvfit",
+  "patchwork",
+  "stringr",
+  "survival",
+  "maxstat",
+  "htmlTable",
+  "Gmisc"
 )
+
+
+options(survey.lonely.psu = "adjust")
+options(survey.adjust.domain.lonely = TRUE)
+library(broom)
+library(maxstat)
 
 for (pkg in packages) {
   # Check if the package is not already installed
@@ -270,8 +283,7 @@ df_dppos_table %>% filter(is.na(LBXGH) | is.na(LBXGLU) )
 
 
 ```{r}
-library(htmlTable)
-library(Gmisc)
+
 
 table.full <- rbind(df_table.mort ,
                     df_table.2,
@@ -479,7 +491,7 @@ df.mort3 <- left_join(df_comp,
 
 
 ```{r}
-library(maxstat)
+
 
 # Find the cut-point in 'pred' that maximally separates the groups
 mstat <- maxstat.test(Surv(permth_exm, as.integer(mortstat)) ~ pred,
@@ -597,13 +609,6 @@ survival_data_pre %>% ggplot() + geom_histogram(aes(x = pred, fill = as.factor(m
 
 
 ```{r}
-
-library(ggplot2)
-library(survminer)
-library(patchwork)
-library(dplyr)
-library(stringr)
-library(survival)
 
 
 fit_actual_pre <- survfit(Surv(permth_exm, event) ~ actual_status,
@@ -766,7 +771,7 @@ cox_model <- coxph(Surv(permth_exm, mortstat) ~ actual_pred_group,
                    data = survival_data_pre )
 
 tbl_regression(cox_model, exponentiate = TRUE)
-library(ggsurvfit)
+
 
 ggsurvfit(fit_detailed,size=2) +
   labs(
@@ -784,9 +789,7 @@ ggsurvfit(fit_detailed,size=2) +
   annotate("text",x=20,y=0.6,label=paste0("HR=",round(exp(cox_model$coefficients[2]),1),"\n","p<2e-16"),color="#D81B60") +theme.1;
 ```
 ```{r}
-library(survey)
-options(survey.lonely.psu = "adjust")
-options(survey.adjust.domain.lonely = TRUE)
+
 
 
 df.weights<- rbind( nhanes("DEMO",1999) %>% select(SEQN,SDMVSTRA,SDMVPSU,WTMEC2YR),
@@ -932,9 +935,7 @@ exp(svycoxph(Surv(permth_exm,event) ~ actual_pred_group +  RIDAGEYR + RIAGENDR +
 # This is a conceptual example as the exact transformation of svykm to
 # the required survminer data frame format might need careful handling
 # of confidence intervals if svykm was run with se=TRUE.
-library(survey)
-library(survminer)
-library(dplyr)
+
 
 # Assuming 'survival_data_pre.weighted' and your design.INT are already defined
 # And assuming you've run the data extraction steps from the previous response
@@ -969,7 +970,7 @@ if ("svykmlist" %in% class(km.out)) {
 
 
 ```{r}
-library(broom)
+
 
 # 1. Extract the raw, unweighted data frame from your survey design object
 raw_data <- design.INT$variables
@@ -1485,8 +1486,7 @@ print(round(results_table, 3))
 
 
 ```{r}
-#install.packages("ragg")
-library(ragg)
+
 ```
 
 ```{r}
@@ -1629,7 +1629,7 @@ print(round(results_table, 3))
 
 
 ```{r}
-library(maxstat)
+
 
 # Find the cut-point in 'pred' that maximally separates the groups
 mstat <- maxstat.test(Surv(permth_exm, event) ~ pred,

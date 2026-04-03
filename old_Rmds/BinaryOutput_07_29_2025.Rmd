@@ -1,0 +1,586 @@
+---
+title: "BinaryOutput_07_29_2025"
+output: html_document
+date: "2025-07-14"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Libraries, include=FALSE,echo=FALSE}
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+#install.packages('nhanesA')
+#install.packages('foreign')
+#install.packages("xgboost")
+#install.packages("caret")
+#install.packages("dplyr")
+
+library(xgboost)
+library(caret)
+library(dplyr)
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+#library(mosaic)
+require(dplyr)
+require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+library(Hmisc)
+library(glmnet)
+library(tidymodels)
+library(data.table)
+library(conflicted)
+library(naniar)
+library(tibble)
+library(dplyr)
+
+conflict_prefer("rename","dplyr")
+conflict_prefer("mutate","dplyr")
+conflict_prefer("sum","base")
+conflict_prefer("filter","dplyr")
+
+library(conflicted)
+conflicts_prefer(base::mean)
+
+conflict_prefer_all("xgboost")
+```
+
+```{r Load DF.MASTER, echo=FALSE}
+
+load('~/Documents/NHANES/df_full_2025.07.14.Rda')
+```
+
+
+```{r Making DF from DF_FULL}
+
+f.yes1.no0 <- function(x) if_else(x=='Yes',1,if_else(x=='No',0,NA))
+# Throwing out BP reading below 20
+f.na.to.0 <- function(x) if_else(is.na(x),0,if_else(x<20,0,x))
+f.na.or.low <- function(x) if_else(is.na(x) | x < 20,0,1)
+
+
+df <- df_full %>% 
+  mutate(
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR)) %>% 
+
+  rename(SEQN=SEQN,Age=RIDAGEYR,Gender=RIAGENDR,# age
+              ## CBC
+              wbc = LBXWBCSI, rbc = LBXRBCSI, hg = LBXHGB, mcv = LBXMCVSI, plt = LBXPLTSI, mpv = LBXMPSI, # WBC, RBC, Hg, MCV, PLT, MPV
+              ## CMP
+              alt = LBXSATSI, alb = LBXSAL, alp = LBXSAPSI, ast = LBXSASSI, # ALT, albumin, ALP, AST
+              ## CMP
+              bicarb = LBXSC3SI, bun = LBXSBU, chlor = LBXSCLSI, # Bicarb,  BUN, Chlor
+              ## CMP
+              cr = LBXSCR, # Creat
+              ## CMP
+              potas = LBXSKSI, #K
+              ## CMP
+              na = LBXSNASI, tbili = LBXSTB, cal = LBXSCA, tprot = LBXSTP, # Na, TBili, Cal, TProt
+              fpg = LBXGLU, #fpg
+        
+              ## Vital Signs
+              pulse = BPXPLS, reg.iregg = BPXPULS, sbp = BPXSY, dbp = BPXDI, 
+              ## Weight Survey
+             
+              a1c = LBXGH, #glycohemoglobin
+              sample.ogtt.weight = WTSOG2YR, two = LBXGLT,  # subsample weight, two hour glucose (mg/dL),
+              dm.told = DIQ010, 
+              Weight = BMXWT,
+              Height.Stand = BMXHT,
+              Arm.Circ = BMXARMC,
+              Waist.Circ = BMXWAIST) %>% 
+
+  rename(
+    Seg.Neut.perc=LBXNEPCT,
+    eosin.perc=LBXEOPCT, 
+    Monocyte.perc=LBXMOPCT,
+    RBC.Dist.Width=LBXRDW,
+    Anemia.Treatment=MCQ053,
+    Mean.Cell.Hemoglobin =LBXMCHSI) %>% 
+  
+  rename(
+    TransfusionEver=MCQ092,
+    MCHC=LBXMC,
+    Told.Asthma = MCQ010,
+    Baso.Perc=LBXBAPCT,
+    BP.Ever.Told.High = BPQ020) %>% 
+  
+  rename(
+    PovertyRatio=INDFMPIR,
+    Race=RIDRETH1,
+    Ppl.In.Household=DMDHHSIZ,
+    Citizenship=DMDCITZN,
+    EducationStatus=DMDEDUC2)
+
+save(df,file="~/Documents/NHANES15-16//df.2025.07.14.Rda")
+
+```
+
+
+
+```{r Defining Column Functions}
+ 
+
+f.align_columns <- function(ma, mb) {
+  # force to plain character vectors
+  ma_columns <- as.character(colnames(ma))
+  mb_columns <- as.character(colnames(mb))
+  
+  # Identify the columns in MA but not in MB
+  missing_columns <- setdiff(ma_columns, mb_columns)
+  
+  # Add missing columns to MB, filled with zeros
+  for (col in missing_columns) {
+    zero_col <- matrix(0, nrow = nrow(mb), ncol = 1)
+    colnames(zero_col) <- col
+    mb <- cbind(mb, zero_col)
+  }
+  
+  # Reorder columns in MB to match the order in MA
+  mb <- mb[, ma_columns, drop = FALSE]
+  
+  return(mb)
+}
+
+
+```
+
+```{r}
+f.is.DM <- function(df.fx){
+  dm = ifelse(
+    is.na(df.fx$a1c) & is.na(df.fx$fpg) & is.na(df.fx$two), NA,
+    ifelse(!is.na(df.fx$a1c) & df.fx$a1c >= 6.5, TRUE,
+      ifelse(!is.na(df.fx$fpg) & df.fx$fpg >= 126, TRUE,
+        ifelse(!is.na(df.fx$two) & df.fx$two >= 200, TRUE, FALSE)
+      )
+    )
+  )
+  return(dm)
+}
+
+```
+
+
+```{r FILTER ON SOMETHING}
+
+df.small <- df 
+
+df.small$DM <- as.factor(f.is.DM(df.small))
+
+dir.string <-"~/Documents/NHANES/"
+date.string <- "2025.07.29-BinaryProbs"
+
+file.office.train <- paste0(dir.string,"NHANES-office-train-layered_", date.string,".Rda")
+file.office.test <- paste0(dir.string,"NHANES-office-test-layered_",date.string,".Rda")
+file.list.models <- paste0(dir.string,"NHANES-All-xgb.models_",date.string,".Rda")
+file.list.prepped.data <- paste0(dir.string,"NHANES-All-prepped.data_",date.string,".Rda")
+
+```
+
+
+
+```{r Prep XGBOOST: Assign labels }
+f.clean.data.for.xgboost <- function(df,
+                                     year_col    = "Year",
+                                     label_col   = "DM",
+                                     weight_col  = "sample.ogtt.weight",
+                                     twohr_col   = "two",
+                                     na_threshold = 0.88){
+
+  # Define pre_df_raw without filtering for two/a1c/fpg as it's not a label-generating set
+  pre_df_raw   <- df %>% filter(.data[[year_col]] >= 1999, .data[[year_col]] <= 2004)
+
+  train_df_raw <- df %>% filter(.data[[year_col]] >= 2005, .data[[year_col]] <= 2014) %>%
+    filter(!is.na(.data[[twohr_col]]), !is.na(a1c), !is.na(fpg)) # <--- ADD THIS FILTER HERE
+
+  test_df_raw  <- df %>% filter(.data[[year_col]] >= 2015, .data[[year_col]] <= 2016)
+
+  # Now, DM is defined on dataframes that are already guaranteed to have non-NA glucose/a1c
+  train_df_with_DM <- train_df_raw
+  train_df_with_DM$DM <- as.numeric(f.is.DM(train_df_with_DM))
+  train_df_with_DM <- train_df_with_DM %>% filter(!is.na(DM))
+
+  test_df_with_DM <- test_df_raw
+  test_df_with_DM$DM <- as.numeric(f.is.DM(test_df_with_DM))
+
+  # Extract labels (already numeric 0/1 here and non-NA by design)
+  labels_train  <- train_df_with_DM[[label_col]]
+  labels_test   <- test_df_with_DM[[label_col]]
+
+  # Extract other metadata/outcome variables from the DM-defined dataframes
+  year_train    <- train_df_with_DM[[year_col]]
+  year_test     <- test_df_with_DM[[year_col]]
+  two_train     <- train_df_with_DM[[twohr_col]]
+  two_test      <- test_df_with_DM[[twohr_col]]
+  weight_train  <- train_df_with_DM[[weight_col]]
+  weight_test   <- test_df_with_DM[[weight_col]]
+
+
+  # Define columns that are NOT features for the model but ARE essential metadata/outcome variables.
+  non_model_features_but_keep_in_df <- c("SEQN", year_col, label_col, weight_col, twohr_col)
+
+  # Determine variables to keep based on the filtered train_df for features
+  keep_vars_for_train_test_features <- names(train_df_with_DM)[vapply(train_df_with_DM, function(x) mean(!is.na(x)), numeric(1)) >= na_threshold]
+  keep_vars_for_pre_features <- names(pre_df_raw)
+
+  final_model_features_for_makeX <- unique(c(keep_vars_for_train_test_features, keep_vars_for_pre_features))
+  final_model_features_for_makeX <- setdiff(final_model_features_for_makeX, non_model_features_but_keep_in_df)
+
+  cols_for_output_df <- unique(c(final_model_features_for_makeX, non_model_features_but_keep_in_df))
+
+  pre_df   <- pre_df_raw   %>% select(any_of(cols_for_output_df))
+  train_df <- train_df_with_DM %>% select(any_of(cols_for_output_df))
+  test_df  <- test_df_with_DM  %>% select(any_of(cols_for_output_df))
+
+  list(
+    office_pre             = pre_df,
+    office_train           = train_df,
+    office_test            = test_df,
+    year.train             = year_train,
+    year.test              = year_test,
+    label.train            = labels_train, # These are guaranteed non-NA and 0/1
+    label.test             = labels_test,  # These are guaranteed non-NA and 0/1
+    train.two              = two_train,
+    test.two               = two_test,
+    weight.sample.train    = weight_train,
+    weight.sample.test     = weight_test
+  )
+}
+```
+
+```{r}
+f.just.prepare.data <- function(clean.output, config) {
+  pre_data   <- clean.output$office_pre
+  train_data <- clean.output$office_train
+  test_data  <- clean.output$office_test
+
+  get_model_features_only <- function(df_input) {
+    # Ensure SEQN is included for tracking before it's temporarily renamed
+    df_input %>%
+      mutate(original_SEQN = SEQN) %>% # Add original_SEQN for tracking
+      select(-any_of(c("SEQN", "DM", "sample.ogtt.weight", "two"))) # Exclude SEQN from features for makeX
+  }
+
+  # Apply the feature selection
+  pre_processed   <- get_model_features_only(pre_data)
+  train_processed <- get_model_features_only(train_data)
+  test_processed  <- get_model_features_only(test_data)
+
+  # Handle NAs and NaNs in numeric columns
+  pre_processed <- pre_processed %>%
+    mutate(across(where(is.numeric), ~replace_na(., as.numeric(NA)))) %>%
+    mutate(across(where(is.numeric), ~replace(. , is.nan(.), as.numeric(NA))))
+
+  train_processed <- train_processed %>%
+    mutate(across(where(is.numeric), ~replace_na(., as.numeric(NA)))) %>%
+    mutate(across(where(is.numeric), ~replace(. , is.nan(.), as.numeric(NA))))
+
+  test_processed <- test_processed %>%
+    mutate(across(where(is.numeric), ~replace_na(., as.numeric(NA)))) %>%
+    mutate(across(where(is.numeric), ~replace(. , is.nan(.), as.numeric(NA))))
+
+  drop_list_cols <- function(df) {
+    df[, !sapply(df, is.list), drop = FALSE]
+  }
+
+  pre_clean   <- drop_list_cols(pre_processed)
+  train_clean <- drop_list_cols(train_processed)
+  test_clean  <- drop_list_cols(test_processed)
+
+  # Training data preparation
+  train_features_and_labels <- cbind(train_clean,
+                                     label = clean.output$label.train,
+                                     weight = clean.output$weight.sample.train)
+
+  # Check if there are any complete cases for training
+  if (nrow(train_features_and_labels[complete.cases(train_features_and_labels %>% select(-original_SEQN)), ]) == 0) {
+    stop("No complete cases found for training data after feature NA removal. Adjust your NA thresholds or data.")
+  }
+  train_complete_cases <- train_features_and_labels[complete.cases(train_features_and_labels %>% select(-original_SEQN)), ]
+
+  labels_train_filtered <- train_complete_cases$label
+  weight_train_filtered <- train_complete_cases$weight
+  train_seqns_filtered <- train_complete_cases$original_SEQN
+  train_X_for_makeX <- train_complete_cases %>% select(-label, -weight, -original_SEQN)
+
+  # Test data preparation
+  test_features_and_labels <- cbind(test_clean,
+                                    label = clean.output$label.test)
+
+  test_seqns_filtered <- test_clean$original_SEQN
+  test_X_for_makeX    <- test_clean   %>% select(-original_SEQN)
+  labels_test_filtered <- clean.output$label.test
+  
+  pre_seqns_filtered <- pre_clean$original_SEQN
+  pre_X_for_makeX    <- pre_clean %>% select(-original_SEQN)
+  
+  # Now, makeX on the cleaned-of-NA-rows dataframes.
+  # Add checks for empty dataframes before makeX
+  if (nrow(train_X_for_makeX) == 0) stop("train_X_for_makeX is empty, cannot proceed with makeX.")
+  train_X <- makeX(as.data.frame(train_X_for_makeX))
+  col_order <- colnames(train_X)
+
+  # Handle potential empty pre_X and test_X after makeX or if input was empty
+  if (nrow(pre_X_for_makeX) == 0) {
+    pre_X <- matrix(0, nrow = 0, ncol = length(col_order))
+    colnames(pre_X) <- col_order
+  } else {
+    pre_X   <- makeX(as.data.frame(pre_X_for_makeX))
+    pre_X <- f.align_columns(train_X, pre_X)
+    pre_X   <- pre_X[, col_order, drop = FALSE]
+  }
+
+  if (nrow(test_X_for_makeX) == 0) {
+    test_X <- matrix(0, nrow = 0, ncol = length(col_order))
+    colnames(test_X) <- col_order
+  } else {
+    test_X  <- makeX(as.data.frame(test_X_for_makeX))
+    test_X <- f.align_columns(train_X, test_X)
+    test_X <- test_X[, col_order, drop = FALSE]
+  }
+
+  # Create DMatrix objects, handling potentially empty ones for test/pre
+  dtrain <- xgb.DMatrix(data = train_X, label = labels_train_filtered)
+
+if (nrow(test_X) > 0) {
+    dtest <- xgb.DMatrix(data = test_X)
+  } else {
+    dtest <- xgb.DMatrix(data = matrix(0, nrow = 0, ncol = ncol(train_X)))
+  }
+
+  weight.sample.train.norm <- weight_train_filtered / sum(weight_train_filtered)
+
+  list(
+    pre_X = pre_X,
+    train_X = train_X,
+    dtrain = dtrain,
+    test_X = test_X,
+    dtest = dtest,
+    weight.sample.train.norm = weight.sample.train.norm,
+    labels.train.filtered = labels_train_filtered,
+    labels.test.filtered = labels_test_filtered,
+    train_seqns_filtered = train_seqns_filtered,
+    test_seqns_filtered = test_seqns_filtered,
+    pre_seqns_filtered = pre_seqns_filtered
+  )
+}
+```
+
+```{r Functions for running models}
+f.run_xgb_model <- function(clean.output, config) {
+
+  # Call f.just.prepare.data to get all prepped data
+  prepped_data <- f.just.prepare.data(clean.output, config)
+
+  dtrain <- prepped_data$dtrain
+  dtest  <- prepped_data$dtest
+  labels_train_filtered <- prepped_data$labels.train.filtered
+  labels_test_filtered  <- prepped_data$labels.test.filtered
+  weight_train_filtered <- prepped_data$weight.sample.train.norm # This is already normalized from f.just.prepare.data
+
+  train_matrix           <- prepped_data$train_X
+  # No need for manual filtering of labels/weights here, it's done in f.just.prepare.data
+
+  # Add final check for labels (redundant if f.just.prepare.data is perfect, but good for safety)
+  if (any(!is.finite(labels_train_filtered)) || any(is.na(labels_train_filtered))) {
+    stop("ERROR: labels_train_filtered still contains NaN, Inf, or NA values before dtrain creation.")
+  }
+
+
+  w_caret            <- weight_train_filtered # Already normalized
+  y_fac              <- factor(labels_train_filtered, levels = c(0, 1), labels = c("zero","one"))
+  tune_grid          <- expand.grid(
+                          nrounds          = c(1500,2000),
+                          eta              = c(0.01,0.05),
+                          max_depth        = c(6,8),
+                          subsample        = c(0.6,0.8),
+                          colsample_bytree = c(0.6,0.8),
+                          min_child_weight = 1,
+                          gamma            = 0
+                        )
+  train_ctrl         <- caret::trainControl(
+                          method          = "cv",
+                          number          = 5,
+                          classProbs      = TRUE,
+                          summaryFunction = twoClassSummary,
+                          verboseIter     = FALSE
+                        )
+    print("Made it here")
+  View(train_matrix)
+  View(y_fac)
+  View(train_ctrl)
+  View(w_caret)
+  print(typeof(train_matrix))
+  xgb_tuned          <- caret::train(
+                          x          = train_matrix, # Extract data from DMatrix for caret
+                          y          = y_fac,
+                          method     = "xgbTree",
+                          tuneGrid   = tune_grid,
+                          trControl  = train_ctrl,
+                          metric     = "ROC",
+                          weights    = w_caret,
+                          verbose    = TRUE
+                        )
+
+  best_params        <- as.list(xgb_tuned$bestTune)
+  best_params$objective <- "binary:logistic"
+  xgb_model <- xgboost::xgb.train(
+    params            = best_params,
+    data              = dtrain,
+    nrounds           = best_params$nrounds,
+    watchlist         = list(train = dtrain),
+    early_stopping_rounds = 50,
+    verbose           = 1
+  )
+
+  pred_probs <- predict(xgb_model, dtest)
+
+  list(
+    model = xgb_model,
+    preds = pred_probs,
+    tuned = xgb_tuned,
+    labels.train.filtered = labels_train_filtered, # Return these for potential later use
+    labels.test.filtered = labels_test_filtered
+  )
+}
+
+
+```
+
+```{r}
+conflict_prefer("arrange","plyr")
+conflict_prefer("desc","plyr")
+conflict_prefer("mosaic","plyr")
+conflict_prefer("Matrix","plyr")
+conflict_prefer("base","plyr")
+
+```
+
+```{r Loop for training and running models}
+pre_idx <- which(df.small$Year >= 1999 & df.small$Year <= 2004)
+train_idx <- which(df.small$Year >= 2005 & df.small$Year <= 2014)
+test_idx  <- which(df.small$Year >= 2015 & df.small$Year <= 2016)
+
+model_configs <- list(
+  Full = list(
+    mutate_expr = ~ .,
+    pred_col = "Pred.Full"
+  )
+)
+
+# Step 1: Clean and split initial dataframes
+clean.output <- f.clean.data.for.xgboost(df.small)
+
+# Step 2: Prepare data for XGBoost (feature matrices, filtered labels, and corresponding SEQNs)
+# This step is now outside the model training loop to ensure consistent data prep.
+prepped_data <- f.just.prepare.data(clean.output, model_configs$Full)
+
+
+xgb_models <- list()
+
+for (model_name in names(model_configs)) {
+  cfg <- model_configs[[model_name]]
+  
+  # re‑prep each time so f.run_xgb_model() gets the full clean.output
+  result        <- f.run_xgb_model(clean.output, cfg)
+  prepped_data  <- f.just.prepare.data(clean.output, cfg)
+  
+  # store the fitted model
+  xgb_models[[model_name]] <- result$model
+  
+  # pre‑period predictions
+  dpre       <- xgb.DMatrix(data = prepped_data$pre_X)
+  pre_preds  <- predict(result$model, dpre)
+ temp_pre_preds <- tibble(
+  SEQN = prepped_data$pre_seqns_filtered
+) %>%
+  mutate(
+    # dynamically create column named in cfg$pred_col
+    !!cfg$pred_col := pre_preds
+  )
+  
+  # test‑period predictions
+  temp_test_preds <- tibble(
+    SEQN            = prepped_data$test_seqns_filtered,
+    !!cfg$pred_col  := result$preds
+  )
+  
+}
+
+# Step 4: Construct the final `office_pre`, `office_train`, `office_test` dataframes
+# Start with the original df.small filtered by year, then left_join the model results.
+
+# Base dataframes (full columns from df.small before any makeX filtering)
+office_pre_base   <- df.small %>% filter(Year >= 1999, Year <= 2004)
+office_train_base <- df.small %>% filter(Year >= 2005, Year <= 2014)
+office_test_base  <- df.small %>% filter(Year >= 2015, Year <= 2016)
+
+temp_pre_preds <- temp_pre_preds %>%
+  distinct(SEQN, .keep_all = TRUE)
+
+
+# For office_pre (1999–2004): safe 1:1 join
+office_pre <- office_pre_base %>%
+  left_join(temp_pre_preds, by = "SEQN")
+
+# For office_train (2005-2014): Join actual labels and weights used in training
+train_model_results <- data.frame(
+  SEQN = prepped_data$train_seqns_filtered,
+  sample.ogtt.weight_model = prepped_data$weight.sample.train.norm
+)
+
+office_train <- office_train_base %>%
+ left_join(train_model_results, by = "SEQN") %>%
+  mutate(
+    sample.ogtt.weight = if_else(
+      !is.na(sample.ogtt.weight_model),
+      sample.ogtt.weight_model,
+      sample.ogtt.weight
+    )
+  ) %>%
+  select(-sample.ogtt.weight_model)
+ 
+test_model_results <- temp_test_preds
+
+office_test <- office_test_base %>%
+  left_join(test_model_results, by = "SEQN")
+
+diq010_lookup <- df.small %>%
+  select(SEQN, dm.told) %>%  # Use the correct name 'dm.told'
+  distinct(SEQN, .keep_all = TRUE) # Ensure one row per participant
+
+# Now, use a left_join to add the DIQ010 column back to each final data frame
+office_pre <- office_pre %>%
+  left_join(diq010_lookup, by = "SEQN")
+
+office_train <- office_train %>%
+  left_join(diq010_lookup, by = "SEQN")
+
+office_test <- office_test %>%
+  left_join(diq010_lookup, by = "SEQN")
+
+# Step 5: Save the final dataframes
+save(office_pre,   file = paste0(dir.string, "NHANES-office-pre_",   date.string, ".Rda"))
+save(office_train, file = paste0(dir.string, "NHANES-office-train_", date.string, ".Rda"))
+save(office_test,  file = paste0(dir.string, "NHANES-office-test_",  date.string, ".Rda"))
+
+# Optional: Save models and prepped data if desired for debugging/reuse
+save(xgb_models, file = file.list.models)
+save(prepped_data, file = file.list.prepped.data) # This will save the output of f.just.prepare.data
+```
+

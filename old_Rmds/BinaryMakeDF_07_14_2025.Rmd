@@ -1,0 +1,243 @@
+---
+title: "BinaryOutput"
+output: html_document
+date: "2025-07-14"
+---
+
+```{r setup, include=FALSE}
+
+### PLEASE REFER TO NHANES-RMS-2024.08.06 for some additional code and checks that we deleted here for conciseness
+### PLEASE REFER TO NHANES-RMS-2024.10.10 for some additional code and checks that we deleted here for conciseness
+
+knitr::opts_chunk$set(include=FALSE, echo = FALSE, warning=FALSE,message=FALSE)
+options(prType='html')
+
+#install.packages('nhanesA')
+#install.packages('foreign')
+library(foreign)
+library(nhanesA)
+library(tidyverse)
+library(gridExtra)
+library(broom)
+require(rms)
+library(ggplot2)
+library(naniar)
+#library(mosaic)
+require(dplyr)
+#require(brms)
+library(pROC)
+library(AUC)
+library(viridis)
+```
+
+```{r}
+letters <- c('D','E','F','G','H','I')
+years <- c(2005,2007,2009,2011,2013,2015)
+
+vars.no.adjust <- c('DEMO','CBC','ALQ','BPQ','DIQ','MCQ',
+                    'BPX','BPXO','GHB','BMX','SLQ','HEPA',
+                    'HEPB_S','HEPE','FASTQX') 
+#omitted DXXAG, HEPC, HEPE, MGX added BPXO
+
+vars.need.adjust <- c('OGTT','GLU','INS','BIOPRO','HEPBD', 'ALB_CR') 
+cols <- c('BMIRECUM','MCQ240D','BPAEN1','MCQ240L','MCQ240B',
+          'DIQ175A','DMDHHSIZ','DMDFMSIZ','DMDHHSZA','DMDHHSZB','DMDHHSZE')
+
+no.var.let <- c('BPXO_D', 'BPXO_E', 'BPXO_F', 'BPXO_G','BPXO_H', 
+                'DXXAG_E','DXXAG_F','FERTIN_G','FERTIN_H','MGX_D',
+                'MGX_E','MGX_F','HEPE_D','HEPE_E','INS_D',
+                'INS_E','INS_F','INS_G')
+
+var.let <- c()
+
+# Function to match column types
+match_column_types <- function(df1, df2) {
+  common_cols <- intersect(names(df1), names(df2))
+  
+  for (col in common_cols) {
+    if (class(df1[[col]]) != class(df2[[col]])) {
+      # If one is factor, convert to character
+      if (is.factor(df1[[col]])) df1[[col]] <- as.character(df1[[col]])
+      if (is.factor(df2[[col]])) df2[[col]] <- as.character(df2[[col]])
+      
+      # If one is numeric and the other is character, convert both to character
+      if ((is.numeric(df1[[col]]) & is.character(df2[[col]])) | 
+          (is.character(df1[[col]]) & is.numeric(df2[[col]]))) {
+        df1[[col]] <- as.character(df1[[col]])
+        df2[[col]] <- as.character(df2[[col]])
+      }
+    }
+  }
+  return(list(df1, df2))
+}
+
+vars <- c(vars.no.adjust,vars.need.adjust)
+
+for (i in 1:length(vars)){
+  j = 1
+  var <- vars[i]
+    # Use flipped order for "P" 
+  if (letters[j] == "P") {                       
+    var.let <- paste0(letters[j], '_', var)
+  } else {
+    var.let <- paste0(var, '_', letters[j])
+  }
+  
+  while ( (var.let %in% no.var.let) & (j <= length(letters)) ){
+    j <- j+ 1
+    # Use flipped order for "P"
+    if (letters[j] == "P") {                  
+      var.let <- paste0(letters[j], '_', var)
+    } else {
+      var.let <- paste0(var, '_', letters[j])
+    }
+  }
+    var.let <- paste0(var,'_',letters[j])
+
+    while ( (var.let %in% no.var.let) & (j <= length(letters)) ){
+    j <- j+ 1
+  }
+  print(letters[j])
+  if (j <= length(letters)) {
+    # Checking if dataset actually exists
+   
+     temp_df <- nhanes(var.let)
+    if (is.null(temp_df)) {
+      warning(paste("Dataset", var.let, "not found. Skipping this iteration."))
+      next  # Skip this iteration if dataset is missing.
+    }
+     
+    # Use the retrieved dataset (temp_df) rather than re-calling nhanes()
+    let.lab <- temp_df %>% mutate(Year = years[j])
+    
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){
+      let.lab <- let.lab  %>%     mutate(LBDHD=factor(
+        LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+    
+    
+    ### HEPBD adjustment
+    if (var.let=="HEPBD_D" | var.let=="HEPBD_E" | var.let=="HEPBD_F" ){
+      let.lab <- let.lab  %>%     mutate(LBDHD=factor(
+        LBDHD,levels=c(1,2),labels=c('Positive','Negative')))
+    }
+    
+    j <- j+1
+  }
+  #print(j)
+  while (j<=length(letters)){
+    let <- letters[j]
+    
+    #Flip if letter is "P"
+    if (let == "P") {                         
+      var.let <- paste0(let, '_', var)
+    } else {
+      var.let <- paste0(var, '_', let)
+    }
+    #print(var.let)
+    #print(! var.let %in% no.var.let)
+    if (! var.let %in% no.var.let) {
+      
+      
+      # Retrieving and checking if dataset exists
+      temp_lab <- nhanes(var.let)
+      if (is.null(temp_lab)) {
+        warning(paste("Dataset", var.let, "not found. Skipping this iteration."))
+      } else {
+        # Use the retrieved dataset (temp_lab) for mutate()
+        lab <- temp_lab %>% mutate(Year = years[j])
+        if (var.let %in% c("HEPBD_D", "HEPBD_E", "HEPBD_F")) {
+          lab <- lab %>% mutate(LBDHD = factor(
+            LBDHD,levels = c(1,2),labels = c('Positive','Negative')))
+        }
+        # Apply type matching
+        combo <- match_column_types(let.lab, lab)
+        let.lab <- combo[[1]]
+        lab <- combo[[2]]
+        
+        # [CHANGE] Instead of restricting to common columns, bind rows directly.
+        let.lab <- dplyr::bind_rows(let.lab, lab)
+      }
+    }
+    
+    j=j+1
+  }
+      for (col in cols){
+        if(sum(col %in% names(let.lab) ) ==1){ let.lab[,col] <- as.numeric(let.lab[,col]) } # specific columns changed to make numeric 
+      }
+        if(i==1){vars.lab <- let.lab} else{vars.lab <-dplyr::full_join(vars.lab,let.lab,join_by(SEQN,Year))}
+}
+
+vars.lab
+
+```
+
+```{r}
+# COMMENT OUT If ALREADY IN ENVIRONMENT
+source("~/Documents/NHANES/OfficePre.R")
+```
+
+```{r}
+df.all <- vars.lab
+
+df.all <- df.all %>%
+  mutate(
+    # average systolic
+    BPXSY = rowMeans(select(., BPXSY1, BPXSY2, BPXSY3), na.rm = TRUE),
+    # average diastolic
+    BPXDI = rowMeans(select(., BPXDI1, BPXDI2, BPXDI3), na.rm = TRUE)
+  ) %>%
+  mutate(
+    BPXSY = ifelse(is.nan(BPXSY), NA_real_, BPXSY),
+    BPXDI = ifelse(is.nan(BPXDI), NA_real_, BPXDI)
+  ) %>%
+  # drop the raw readings
+  select(-BPXSY1, -BPXSY2, -BPXSY3, -BPXDI1, -BPXDI2, -BPXDI3)
+```
+
+
+```{r}
+common_cols = intersect(names(df_combined), names(df.all))
+
+df_combined <- df_combined %>%
+  select(all_of(c(common_cols, 'LBXGLU')))#, 'WTSOG2YR', 'LBXGLT')))
+
+df_combined$WTSOG2YR <- NA
+df_combined$LBXGLT <- NA
+
+df_all <- df.all %>%
+  select(all_of(c(common_cols, 'LBXGLT', 'WTSOG2YR', 'LBXGLU'))) 
+
+df_full <- bind_rows(df_combined, df_all)
+```
+
+```{r}
+df_full %>% 
+  
+  ### We are going to update everything match 2015-2016 as best we can
+  mutate(
+  ### INS adjustment
+  #### Insulin (2011 & post-2011) = 0.8868*Insulin (pre-2011) + [0.0011*Insulin (pre-2011)**2] – 0.0744.  
+  ### GLU adjustment
+  ### Y (Roche ModP 2007) = X (Roche 911 2005-2006) + 1.148, n=143, r=0.997, slope was not significant.
+  LBXGLU = if_else(Year < 2007, LBXGLU + 1.148, LBXGLU),
+  LBXGLT = if_else(Year < 2007, LBXGLT + 1.148, LBXGLT),
+  ## FPG
+  ) %>% 
+  mutate(
+  ### GLU Forward: Y (C311 2015-2016) = 1.023 (95%CI: 1.014 – 1.032) * X (C501 2013-2014) - 0.5108 (95%CI: -1.441 – 0.4197)
+  LBXGLU = if_else(Year < 2015, 1.023 * LBXGLU - 0.5108, LBXGLU  ),
+  LBXGLT = if_else(Year < 2015, 1.023 * LBXGLT - 0.5108, LBXGLT ),
+  ### Cr adjustment  
+  #### Standard creatinine (mg/dL) = -0.016 + 0.978 X (NHANES 05-06 uncalibrated serum creatinine, mg/dL)
+  
+  #Commented out below line:
+  LBXSCR = if_else(Year==2005, -0.016 + 0.978 * LBXSCR , LBXSCR), 
+  )
+```
+
+
+```{r}
+save(df_full,file='~/Documents/NHANES/df_full_2025.07.14.Rda')
+```
+

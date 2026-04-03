@@ -1,0 +1,964 @@
+---
+title: "MapCountry"
+author: "alanlhutchison"
+date: "2025-08-05"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r }
+# Load the necessary libraries
+library(ggplot2)
+library(dplyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+
+# 1. Read in the transplant data using tribble()
+transplant_data <- tribble(
+  ~country_origin, ~type,      ~transplants, ~rnaturalearth_name,
+  "BAHRAIN",       "Deceased", 1,            "Bahrain",
+  "BAHRAIN",       "Living",   0,            "Bahrain",
+  "BERMUDA",       "Deceased", 1,            "Bermuda",
+  "BERMUDA",       "Living",   0,            "Bermuda",
+  "BRAZIL",        "Deceased", 1,            "Brazil",
+  "BRAZIL",        "Living",   0,            "Brazil",
+  "BURUNDI",       "Deceased", 1,            "Burundi",
+  "BURUNDI",       "Living",   0,            "Burundi",
+  "CAMBODIA",      "Deceased", 1,            "Cambodia",
+  "CAMBODIA",      "Living",   0,            "Cambodia",
+  "CANADA",        "Deceased", 4,            "Canada",
+  "CANADA",        "Living",   0,            "Canada",
+  "CAYMAN ISLAND", "Deceased", 2,            "Cayman Islands",
+  "CAYMAN ISLAND", "Living",   0,            "Cayman Islands",
+  "CHILE",         "Deceased", 1,            "Chile",
+  "CHILE",         "Living",   0,            "Chile",
+  "COSTA RICA",    "Deceased", 1,            "Costa Rica",
+  "COSTA RICA",    "Living",   0,            "Costa Rica",
+  "CUBA",          "Deceased", 1,            "Cuba",
+  "CUBA",          "Living",   0,            "Cuba",
+  "DOMINICAN REPUBLIC", "Deceased", 3,       "Dominican Republic",
+  "DOMINICAN REPUBLIC", "Living",   1,       "Dominican Republic",
+  "EGYPT",         "Deceased", 2,            "Egypt",
+  "EGYPT",         "Living",   0,            "Egypt",
+  "EL SALVADOR",   "Deceased", 4,            "El Salvador",
+  "EL SALVADOR",   "Living",   0,            "El Salvador",
+  "GREECE",        "Deceased", 2,            "Greece",
+  "GREECE",        "Living",   0,            "Greece",
+  "GUATEMALA",     "Deceased", 1,            "Guatemala",
+  "GUATEMALA",     "Living",   0,            "Guatemala",
+  "ISRAEL",        "Deceased", 38,           "Israel",
+  "ISRAEL",        "Living",   0,            "Israel",
+  "JAPAN",         "Deceased", 1,            "Japan",
+  "JAPAN",         "Living",   0,            "Japan",
+  "JORDAN",        "Deceased", 2,            "Jordan",
+  "JORDAN",        "Living",   13,           "Jordan",
+  "KUWAIT",        "Deceased", 31,           "Kuwait",
+  "KUWAIT",        "Living",   14,           "Kuwait",
+  "LEBANON",       "Deceased", 1,            "Lebanon",
+  "LEBANON",       "Living",   0,            "Lebanon",
+  "MEXICO",        "Deceased", 1,            "Mexico",
+  "MEXICO",        "Living",   0,            "Mexico",
+  "NICARAGUA",     "Deceased", 1,            "Nicaragua",
+  "NICARAGUA",     "Living",   0,            "Nicaragua",
+  "PARAGUAY",      "Deceased", 1,            "Paraguay",
+  "PARAGUAY",      "Living",   0,            "Paraguay",
+  "PHILIPPINES",   "Deceased", 4,            "Philippines",
+  "PHILIPPINES",   "Living",   1,            "Philippines",
+  "QATAR",         "Deceased", 1,            "Qatar",
+  "QATAR",         "Living",   1,            "Qatar",
+  "RUSSIA",        "Deceased", 17,           "Russia",
+  "RUSSIA",        "Living",   4,            "Russia",
+  "SAUDI ARABIA",  "Deceased", 62,           "Saudi Arabia",
+  "SAUDI ARABIA",  "Living",   7,            "Saudi Arabia",
+  "SINGAPORE",     "Deceased", 1,            "Singapore",
+  "SINGAPORE",     "Living",   0,            "Singapore",
+  "SOUTH AFRICA",  "Deceased", 1,            "South Africa",
+  "SOUTH AFRICA",  "Living",   0,            "South Africa",
+  "TURKEY",        "Deceased", 12,           "Turkey",
+  "TURKEY",        "Living",   6,            "Turkey",
+  "UNITED ARAB EMIRATES", "Deceased", 6,     "United Arab Emirates",
+  "UNITED ARAB EMIRATES", "Living",   1,     "United Arab Emirates",
+  "UNITED KINGDOM", "Deceased", 3,          "United Kingdom",
+  "UNITED KINGDOM", "Living",   0,          "United Kingdom",
+  "VENEZUELA",     "Deceased", 4,            "Venezuela",
+  "VENEZUELA",     "Living",   1,            "Venezuela",
+  "VIET NAM",      "Deceased", 3,            "Viet Nam",
+  "VIET NAM",      "Living",   0,            "Viet Nam",
+  "YEMEN:REPUBLIC OF", "Deceased", 1,       "Yemen",
+  "YEMEN:REPUBLIC OF", "Living",   0,       "Yemen"
+)
+
+# 2. Get the world map data
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# 3. Create a template for all countries and both types
+# This ensures that every country has a 'type' value.
+map_data_template <- world_map %>% 
+  select(name_long, geometry) %>% 
+  # Use full_join to make sure every country is in the template
+  full_join(
+    expand.grid(name_long = unique(world_map$name_long), 
+                type = c("Deceased", "Living")),
+    by = "name_long"
+  )
+
+# 4. Merge the template with the transplant data
+# Now, we join the cleaned transplant data back to the template.
+world_map_with_data <- map_data_template %>%
+  left_join(transplant_data %>% select(rnaturalearth_name, type, transplants), 
+            by = c("name_long" = "rnaturalearth_name", "type")) %>%
+  # Fill NA values for transplants with 0 for countries with no data
+  mutate(transplants = tidyr::replace_na(transplants, 0))
+
+# 5. Create the two faceted maps
+ggplot(data = world_map_with_data) +
+  geom_sf(aes(fill = transplants)) +
+  
+  # Set a consistent color scale for fair comparison
+  scale_fill_continuous(
+    option = "magma", direction = -1,
+    name = "Number of Transplants", 
+    na.value = "grey80", 
+    limits = c(0, max(transplant_data$transplants, na.rm = TRUE)) 
+  ) +
+  
+  # Use facet_wrap to create a separate map for each 'type' (Deceased/Living)
+  facet_wrap(~ type,ncol=1) +
+  
+  # Polish the maps for a clean look
+  labs(
+    title = "Deceased vs. Living Transplants by Country",
+    subtitle = "Data from a provided bar chart"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12)
+  )
+```
+
+
+```{r}
+
+# Option to suppress the warning if you want a clean console
+centroids_sf <- suppressWarnings(
+  st_centroid(world_map, of_largest_geom = TRUE)
+) %>%
+  st_transform(crs = "+proj=longlat +datum=WGS84")
+
+# Load the necessary libraries
+library(ggplot2)
+library(dplyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf)
+library(tidyr) # The expand_grid function is in tidyr
+
+# 1. Read in the transplant data
+transplant_data <- tribble(
+  ~country_origin, ~type,      ~transplants, ~rnaturalearth_name,
+  "BAHRAIN",       "Deceased", 1,            "Bahrain",
+  "BAHRAIN",       "Living",   0,            "Bahrain",
+  "BERMUDA",       "Deceased", 1,            "Bermuda",
+  "BERMUDA",       "Living",   0,            "Bermuda",
+  "BRAZIL",        "Deceased", 1,            "Brazil",
+  "BRAZIL",        "Living",   0,            "Brazil",
+  "BURUNDI",       "Deceased", 1,            "Burundi",
+  "BURUNDI",       "Living",   0,            "Burundi",
+  "CAMBODIA",      "Deceased", 1,            "Cambodia",
+  "CAMBODIA",      "Living",   0,            "Cambodia",
+  "CANADA",        "Deceased", 4,            "Canada",
+  "CANADA",        "Living",   0,            "Canada",
+  "CAYMAN ISLAND", "Deceased", 2,            "Cayman Islands",
+  "CAYMAN ISLAND", "Living",   0,            "Cayman Islands",
+  "CHILE",         "Deceased", 1,            "Chile",
+  "CHILE",         "Living",   0,            "Chile",
+  "COSTA RICA",    "Deceased", 1,            "Costa Rica",
+  "COSTA RICA",    "Living",   0,            "Costa Rica",
+  "CUBA",          "Deceased", 1,            "Cuba",
+  "CUBA",          "Living",   0,            "Cuba",
+  "DOMINICAN REPUBLIC", "Deceased", 3,       "Dominican Republic",
+  "DOMINICAN REPUBLIC", "Living",   1,       "Dominican Republic",
+  "EGYPT",         "Deceased", 2,            "Egypt",
+  "EGYPT",         "Living",   0,            "Egypt",
+  "EL SALVADOR",   "Deceased", 4,            "El Salvador",
+  "EL SALVADOR",   "Living",   0,            "El Salvador",
+  "GREECE",        "Deceased", 2,            "Greece",
+  "GREECE",        "Living",   0,            "Greece",
+  "GUATEMALA",     "Deceased", 1,            "Guatemala",
+  "GUATEMALA",     "Living",   0,            "Guatemala",
+  "ISRAEL",        "Deceased", 38,           "Israel",
+  "ISRAEL",        "Living",   0,            "Israel",
+  "JAPAN",         "Deceased", 1,            "Japan",
+  "JAPAN",         "Living",   0,            "Japan",
+  "JORDAN",        "Deceased", 2,            "Jordan",
+  "JORDAN",        "Living",   13,           "Jordan",
+  "KUWAIT",        "Deceased", 31,           "Kuwait",
+  "KUWAIT",        "Living",   14,           "Kuwait",
+  "LEBANON",       "Deceased", 1,            "Lebanon",
+  "LEBANON",       "Living",   0,            "Lebanon",
+  "MEXICO",        "Deceased", 1,            "Mexico",
+  "MEXICO",        "Living",   0,            "Mexico",
+  "NICARAGUA",     "Deceased", 1,            "Nicaragua",
+  "NICARAGUA",     "Living",   0,            "Nicaragua",
+  "PARAGUAY",      "Deceased", 1,            "Paraguay",
+  "PARAGUAY",      "Living",   0,            "Paraguay",
+  "PHILIPPINES",   "Deceased", 4,            "Philippines",
+  "PHILIPPINES",   "Living",   1,            "Philippines",
+  "QATAR",         "Deceased", 1,            "Qatar",
+  "QATAR",         "Living",   1,            "Qatar",
+  "RUSSIA",        "Deceased", 17,           "Russia",
+  "RUSSIA",        "Living",   4,            "Russia",
+  "SAUDI ARABIA",  "Deceased", 62,           "Saudi Arabia",
+  "SAUDI ARABIA",  "Living",   7,            "Saudi Arabia",
+  "SINGAPORE",     "Deceased", 1,            "Singapore",
+  "SINGAPORE",     "Living",   0,            "Singapore",
+  "SOUTH AFRICA",  "Deceased", 1,            "South Africa",
+  "SOUTH AFRICA",  "Living",   0,            "South Africa",
+  "TURKEY",        "Deceased", 12,           "Turkey",
+  "TURKEY",         "Living",   6,            "Turkey",
+  "UNITED ARAB EMIRATES", "Deceased", 6,     "United Arab Emirates",
+  "UNITED ARAB EMIRATES", "Living",   1,     "United Arab Emirates",
+  "UNITED KINGDOM", "Deceased", 3,          "United Kingdom",
+  "UNITED KINGDOM", "Living",   0,          "United Kingdom",
+  "VENEZUELA",     "Deceased", 4,            "Venezuela",
+  "VENEZUELA",     "Living",   1,            "Venezuela",
+  "VIET NAM",      "Deceased", 3,            "Viet Nam",
+  "VIET NAM",      "Living",   0,            "Viet Nam",
+  "YEMEN:REPUBLIC OF", "Deceased", 1,       "Yemen",
+  "YEMEN:REPUBLIC OF", "Living",   0,       "Yemen"
+)
+
+# 2. Get the world map data
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# 3. Create a clean, non-spatial data frame with all the information
+# This is the key step. We build the full data set first.
+full_plot_data <- tibble(name_long = unique(world_map$name_long)) %>%
+  tidyr::expand_grid(type = c("Deceased", "Living")) %>%
+  left_join(transplant_data, by = c("name_long" = "rnaturalearth_name", "type")) %>%
+  mutate(transplants = tidyr::replace_na(transplants, 0))
+
+# 4. Compute centroids and join the clean data to the spatial object
+# We join the spatial data with the non-spatial data
+centroids_sf <- st_centroid(world_map, of_largest_geom = TRUE) %>%
+  st_transform(crs = "+proj=longlat +datum=WGS84")
+
+# Now, we join the full non-spatial data to the centroids
+# The 'type' column is in full_plot_data, and we want to keep all rows from it
+centroid_data_for_plot <- centroids_sf %>%
+  right_join(full_plot_data, by = "name_long") %>%
+  # Filter for only countries with transplants for the dots
+  filter(transplants > 0)
+
+# 5. Create the two faceted proportional symbol maps
+ggplot() +
+  # Layer 1: Plot the country borders as a background
+  geom_sf(data = world_map, fill = "grey95", color = "white", size = 0.2) +
+
+  # Layer 2: Plot the circles at the centroids
+  geom_sf(
+    data = centroid_data_for_plot,
+    aes(size = transplants),
+    shape = 21, # Circle with border
+    color = "black",
+    alpha = 0.7
+  ) +
+
+  # Set the scale for the circle sizes
+  scale_size_continuous(range = c(1, 10), name = "Number of Transplants") +
+
+  # Set the colors for the deceased and living transplants
+  scale_fill_manual(
+    values = c("Deceased" = "firebrick3", "Living" = "royalblue3"),
+    name = "Transplant Type"
+  ) +
+
+  # Use facet_wrap to create a separate map for each 'type'
+  #facet_wrap(~ type) +
+
+  # Add polish
+  labs(
+    title = "Proportional Symbol Map of Transplants by Country",
+    subtitle = "Size of circle is proportional to the number of transplants"
+  ) +
+  theme_void() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5),
+    legend.position = "bottom",
+    strip.text = element_text(face = "bold", size = 12)
+  )
+
+
+```
+
+
+```{r}
+# Install necessary packages if you haven't already
+# install.packages("rworldmap")
+# install.packages("cartogram")
+# install.packages("sf") # sf is often a dependency for spatial data
+
+# Load the required libraries
+library(rworldmap)
+library(cartogram)
+library(sf)
+library(ggplot2) # For better plotting if desired, though cartogram has its own plot method
+
+# --- 1. Get World Map Data ---
+# Get the base world map data. rworldmap provides a convenient way to do this.
+# We'll convert it to an 'sf' object, which is preferred by the 'cartogram' package.
+world_map_sf <- st_as_sf(getMap(resolution = "low"))
+
+# --- IMPORTANT FIX: Project the map data ---
+# The cartogram functions work best with projected data, especially for area calculations.
+# We'll transform the map to an equal-area projection (e.g., World Equal Area Cylindrical - EPSG:8857).
+# This ensures that area distortions are calculated correctly.
+cat("Transforming map projection...\n")
+world_map_projected <- st_transform(world_map_sf, crs = 8857) # EPSG:8857 for World Equal Area Cylindrical
+cat("Map projection transformed.\n")
+
+# --- 2. Create Sample Data ---
+# Create a data frame with country names (matching 'ISO_A2' or 'SOVEREIGNT' in world_map_sf)
+# and some integer values.
+# Replace this with your actual table data.
+# Ensure your country identifiers match those in the 'world_map_sf' object.
+# Common identifiers are 'ISO_A3' (3-letter ISO code), 'ISO_A2' (2-letter ISO code),
+# or 'SOVEREIGNT' (sovereign country name). Let's use 'SOVEREIGNT' for simplicity here.
+
+sample_data <- data.frame(
+  country = c("United States", "China", "India", "Germany", "Brazil", "Canada",
+              "Australia", "France", "Japan", "United Kingdom", "Russia", "Egypt",
+              "South Africa", "Argentina", "Mexico", "Indonesia", "Italy", "Spain",
+              "Nigeria", "Ethiopia", "Greenland", "Antarctica", "Somalia", "Finland",
+              "New Zealand", "Madagascar", "Chile", "Norway", "Sweden", "Poland",
+              "Ukraine", "Kazakhstan", "Saudi Arabia", "South Korea", "North Korea",
+              "Iran", "Iraq", "Afghanistan", "Pakistan", "Turkey", "Greece",
+              "Portugal", "Ireland", "Switzerland", "Austria", "Belgium",
+              "Netherlands", "Denmark", "Czech Republic", "Hungary", "Romania",
+              "Bulgaria", "Serbia", "Croatia", "Bosnia and Herzegovina", "Albania",
+              "Kosovo", "North Macedonia", "Slovenia", "Slovakia", "Estonia",
+              "Latvia", "Lithuania", "Belarus", "Moldova", "Syria", "Lebanon",
+              "Israel", "Jordan", "Yemen", "Oman", "United Arab Emirates",
+              "Qatar", "Bahrain", "Kuwait", "Azerbaijan", "Armenia", "Georgia",
+              "Uzbekistan", "Turkmenistan", "Kyrgyzstan", "Tajikistan", "Mongolia",
+              "Nepal", "Bhutan", "Bangladesh", "Myanmar", "Thailand", "Vietnam",
+              "Cambodia", "Laos", "Malaysia", "Singapore", "Philippines",
+              "Sri Lanka", "Maldives", "Papua New Guinea", "Fiji", "Solomon Islands",
+              "Vanuatu", "New Caledonia", "East Timor", "Brunei", "Timor-Leste",
+              "Indonesia", "Australia", "New Zealand", "Fiji", "Samoa", "Tonga",
+              "Kiribati", "Tuvalu", "Nauru", "Palau", "Micronesia", "Marshall Islands",
+              "Canada", "United States", "Mexico", "Guatemala", "Belize", "El Salvador",
+              "Honduras", "Nicaragua", "Costa Rica", "Panama", "Cuba", "Jamaica",
+              "Haiti", "Dominican Republic", "Puerto Rico", "Bahamas", "Trinidad and Tobago",
+              "Barbados", "Grenada", "Saint Lucia", "Saint Vincent and the Grenadines",
+              "Antigua and Barbuda", "Saint Kitts and Nevis", "Dominica", "Venezuela",
+              "Colombia", "Ecuador", "Peru", "Bolivia", "Paraguay", "Uruguay",
+              "Argentina", "Chile", "Guyana", "Suriname", "French Guiana", "Brazil",
+              "United Kingdom", "Ireland", "France", "Spain", "Portugal", "Italy",
+              "Belgium", "Netherlands", "Luxembourg", "Germany", "Switzerland",
+              "Austria", "Czech Republic", "Poland", "Hungary", "Slovakia",
+              "Slovenia", "Croatia", "Bosnia and Herzegovina", "Serbia", "Montenegro",
+              "Albania", "North Macedonia", "Greece", "Bulgaria", "Romania",
+              "Moldova", "Ukraine", "Belarus", "Lithuania", "Latvia", "Estonia",
+              "Finland", "Sweden", "Norway", "Denmark", "Iceland", "Russia",
+              "Turkey", "Cyprus", "Malta", "Egypt", "Libya", "Tunisia", "Algeria",
+              "Morocco", "Mauritania", "Western Sahara", "Senegal", "Gambia",
+              "Guinea-Bissau", "Guinea", "Sierra Leone", "Liberia", "Ivory Coast",
+              "Ghana", "Togo", "Benin", "Nigeria", "Niger", "Burkina Faso", "Mali",
+              "Chad", "Cameroon", "Central African Republic", "Sudan", "South Sudan",
+              "Eritrea", "Djibouti", "Ethiopia", "Somalia", "Kenya", "Uganda",
+              "Rwanda", "Burundi", "Tanzania", "Democratic Republic of the Congo",
+              "Republic of the Congo", "Gabon", "Equatorial Guinea", "Sao Tome and Principe",
+              "Angola", "Zambia", "Malawi", "Mozambique", "Zimbabwe", "Botswana",
+              "Namibia", "South Africa", "Lesotho", "Eswatini", "Madagascar",
+              "Comoros", "Mauritius", "Seychelles"
+              ),
+  value = c(5000,rep(1,247)) # Random values for demonstration
+)
+
+
+# --- 3. Merge Sample Data with Map Data ---
+# It's crucial that the country names in your sample_data match a column in world_map_projected.
+# We'll use 'SOVEREIGNT' from world_map_projected and 'country' from sample_data for merging.
+# First, ensure both are character strings for proper merging.
+world_map_projected$SOVEREIGNT <- as.character(world_map_projected$SOVEREIGNT)
+sample_data$country <- as.character(sample_data$country)
+
+# Merge the data. Use a left join to keep all map polygons.
+# Countries in world_map_projected that are not in sample_data will have NA for 'value'.
+world_map_with_data <- merge(
+  world_map_projected, # Use the projected map data here
+  sample_data,
+  by.x = "SOVEREIGNT", # Column in world_map_projected
+  by.y = "country",    # Column in sample_data
+  all.x = TRUE         # Keep all rows from world_map_projected
+)
+
+# Handle NA values: For countries not in your sample_data, their 'value' will be NA.
+# The cartogram function might struggle with NAs or treat them as 0.
+# It's good practice to decide how to handle them. For this example, let's set NA values to 0.
+world_map_with_data$value[is.na(world_map_with_data$value)] <- 0
+
+# --- 4. Create the Cartogram ---
+# Note: Cartogram generation can be computationally intensive for very detailed maps
+# or very large datasets.
+
+cat("Generating cartogram... This might take a moment.\n")
+
+# Option 1: Continuous Area Cartogram (distorts shapes)
+# This will distort the actual shapes of the countries.
+cartogram_result <- cartogram_cont(
+  world_map_with_data,
+  weight = "value", # The column containing your integer values
+  itermax = 100      # Increased iterations for potentially more visible distortion
+)
+
+# Option 2: Dorling Cartogram (uses circles, often more visually striking for size scaling)
+# This will represent each country as a circle scaled by its 'value'.
+# cartogram_result <- cartogram_dorling(
+#   world_map_with_data,
+#   weight = "value", # The column containing your integer values
+#   k = 1,            # Scaling factor for circle size (adjust as needed)
+#   itermax = 100     # More iterations for better packing of circles
+# )
+
+cat("Cartogram generation complete.\n")
+
+# --- 5. Plot the Cartogram ---
+# You can plot the 'sf' object directly.
+# Let's color the countries based on the 'value' for better visualization.
+
+# Determine the number of colors in the palette
+num_colors <- 10
+color_palette <- hcl.colors(num_colors, "viridis")
+
+# Calculate breaks: need one more break than colors
+# Ensure breaks span the range of your 'value' data
+min_val <- min(cartogram_result$value, na.rm = TRUE)
+max_val <- max(cartogram_result$value, na.rm = TRUE)
+plot_breaks <- seq(min_val, max_val, length.out = num_colors + 1)
+
+
+# Plotting with base plot function for sf objects
+plot(
+  cartogram_result["value"], # Plot the 'value' column
+  main = "World Map Scaled by Sample Value (Continuous Cartogram)", # Updated title
+  key.pos = 4, # Position of the legend (1=bottom, 2=left, 3=top, 4=right)
+  pal = color_palette, # Color palette
+  breaks = plot_breaks, # Explicitly define breaks
+  border = "grey", # Border color for countries
+  lwd = 0.5 # Line width for borders
+)
+
+# Add original map for comparison (optional)
+# plot(st_geometry(world_map_projected), border = "blue", add = TRUE) # This would overlay
+
+# If you prefer ggplot2 for more customization:
+# library(ggplot2)
+# ggplot(data = cartogram_result) +
+#   geom_sf(aes(fill = value), color = "grey", size = 0.2) +
+#   scale_fill_viridis_c(option = "plasma", name = "Your Value") +
+#   labs(title = "World Map Scaled by Sample Value (Cartogram)") +
+#   theme_minimal() +
+#   theme(
+#     plot.title = element_text(hjust = 0.5, face = "bold"),
+#     legend.position = "right"
+#   )
+
+# You can also plot the original map to compare
+# plot(world_map_projected["value"], main = "Original World Map with Sample Value")
+
+```
+```{r}
+# Install necessary packages if you haven't already
+# install.packages("rworldmap")
+# install.packages("cartogram")
+# install.packages("sf") # sf is often a dependency for spatial data
+
+# Load the required libraries
+library(rworldmap)
+library(cartogram)
+library(sf)
+library(ggplot2) # For better plotting if desired, though cartogram has its own plot method
+
+# --- 1. Get World Map Data ---
+# Get the base world map data. rworldmap provides a convenient way to do this.
+# We'll convert it to an 'sf' object, which is preferred by the 'cartogram' package.
+world_map_sf <- st_as_sf(getMap(resolution = "low"))
+
+# --- IMPORTANT FIX: Project the map data ---
+# The cartogram functions work best with projected data, especially for area calculations.
+# We'll transform the map to an equal-area projection (e.g., World Equal Area Cylindrical - EPSG:8857).
+# This ensures that area distortions are calculated correctly.
+cat("Transforming map projection...\n")
+world_map_projected <- st_transform(world_map_sf, crs = 8857) # EPSG:8857 for World Equal Area Cylindrical
+cat("Map projection transformed.\n")
+
+# --- 2. Create Sample Data ---
+# Create a data frame with country names (matching 'ISO_A2' or 'SOVEREIGNT' in world_map_sf)
+# and some integer values.
+# Replace this with your actual table data.
+# Ensure your country identifiers match those in the 'world_map_sf' object.
+# Common identifiers are 'ISO_A3' (3-letter ISO code), 'ISO_A2' (2-letter ISO code),
+# or 'SOVEREIGNT' (sovereign country name). Let's use 'SOVEREIGNT' for simplicity here.
+
+sample_data <- data.frame(
+  country = c("United States", "China", "India", "Germany", "Brazil", "Canada",
+              "Australia", "France", "Japan", "United Kingdom", "Russia", "Egypt",
+              "South Africa", "Argentina", "Mexico", "Indonesia", "Italy", "Spain",
+              "Nigeria", "Ethiopia", "Greenland", "Antarctica", "Somalia", "Finland",
+              "New Zealand", "Madagascar", "Chile", "Norway", "Sweden", "Poland",
+              "Ukraine", "Kazakhstan", "Saudi Arabia", "South Korea", "North Korea",
+              "Iran", "Iraq", "Afghanistan", "Pakistan", "Turkey", "Greece",
+              "Portugal", "Ireland", "Switzerland", "Austria", "Belgium",
+              "Netherlands", "Denmark", "Czech Republic", "Hungary", "Romania",
+              "Bulgaria", "Serbia", "Croatia", "Bosnia and Herzegovina", "Albania",
+              "Kosovo", "North Macedonia", "Slovenia", "Slovakia", "Estonia",
+              "Latvia", "Lithuania", "Belarus", "Moldova", "Syria", "Lebanon",
+              "Israel", "Jordan", "Yemen", "Oman", "United Arab Emirates",
+              "Qatar", "Bahrain", "Kuwait", "Azerbaijan", "Armenia", "Georgia",
+              "Uzbekistan", "Turkmenistan", "Kyrgyzstan", "Tajikistan", "Mongolia",
+              "Nepal", "Bhutan", "Bangladesh", "Myanmar", "Thailand", "Vietnam",
+              "Cambodia", "Laos", "Malaysia", "Singapore", "Philippines",
+              "Sri Lanka", "Maldives", "Papua New Guinea", "Fiji", "Solomon Islands",
+              "Vanuatu", "New Caledonia", "East Timor", "Brunei", "Timor-Leste",
+              "Indonesia", "Australia", "New Zealand", "Fiji", "Samoa", "Tonga",
+              "Kiribati", "Tuvalu", "Nauru", "Palau", "Micronesia", "Marshall Islands",
+              "Canada", "United States", "Mexico", "Guatemala", "Belize", "El Salvador",
+              "Honduras", "Nicaragua", "Costa Rica", "Panama", "Cuba", "Jamaica",
+              "Haiti", "Dominican Republic", "Puerto Rico", "Bahamas", "Trinidad and Tobago",
+              "Barbados", "Grenada", "Saint Lucia", "Saint Vincent and the Grenadines",
+              "Antigua and Barbuda", "Saint Kitts and Nevis", "Dominica", "Venezuela",
+              "Colombia", "Ecuador", "Peru", "Bolivia", "Paraguay", "Uruguay",
+              "Argentina", "Chile", "Guyana", "Suriname", "French Guiana", "Brazil",
+              "United Kingdom", "Ireland", "France", "Spain", "Portugal", "Italy",
+              "Belgium", "Netherlands", "Luxembourg", "Germany", "Switzerland",
+              "Austria", "Czech Republic", "Poland", "Hungary", "Slovakia",
+              "Slovenia", "Croatia", "Bosnia and Herzegovina", "Serbia", "Montenegro",
+              "Albania", "North Macedonia", "Greece", "Bulgaria", "Romania",
+              "Moldova", "Ukraine", "Belarus", "Lithuania", "Latvia", "Estonia",
+              "Finland", "Sweden", "Norway", "Denmark", "Iceland", "Russia",
+              "Turkey", "Cyprus", "Malta", "Egypt", "Libya", "Tunisia", "Algeria",
+              "Morocco", "Mauritania", "Western Sahara", "Senegal", "Gambia",
+              "Guinea-Bissau", "Guinea", "Sierra Leone", "Liberia", "Ivory Coast",
+              "Ghana", "Togo", "Benin", "Nigeria", "Niger", "Burkina Faso", "Mali",
+              "Chad", "Cameroon", "Central African Republic", "Sudan", "South Sudan",
+              "Eritrea", "Djibouti", "Ethiopia", "Somalia", "Kenya", "Uganda",
+              "Rwanda", "Burundi", "Tanzania", "Democratic Republic of the Congo",
+              "Republic of the Congo", "Gabon", "Equatorial Guinea", "Sao Tome and Principe",
+              "Angola", "Zambia", "Malawi", "Mozambique", "Zimbabwe", "Botswana",
+              "Namibia", "South Africa", "Lesotho", "Eswatini", "Madagascar",
+              "Comoros", "Mauritius", "Seychelles"
+              ),
+  value = sample(1:248, 248, replace = TRUE) # Random values for demonstration
+)
+
+
+# --- 3. Merge Sample Data with Map Data ---
+# It's crucial that the country names in your sample_data match a column in world_map_projected.
+# We'll use 'SOVEREIGNT' from world_map_projected and 'country' from sample_data for merging.
+# First, ensure both are character strings for proper merging.
+world_map_projected$SOVEREIGNT <- as.character(world_map_projected$SOVEREIGNT)
+sample_data$country <- as.character(sample_data$country)
+
+# Merge the data. Use a left join to keep all map polygons.
+# Countries in world_map_projected that are not in sample_data will have NA for 'value'.
+world_map_with_data <- merge(
+  world_map_projected, # Use the projected map data here
+  sample_data,
+  by.x = "SOVEREIGNT", # Column in world_map_projected
+  by.y = "country",    # Column in sample_data
+  all.x = TRUE         # Keep all rows from world_map_projected
+)
+
+# Handle NA values: For countries not in your sample_data, their 'value' will be NA.
+# The cartogram function might struggle with NAs or treat them as 0.
+# It's good practice to decide how to handle them. For this example, let's set NA values to 0.
+world_map_with_data$value[is.na(world_map_with_data$value)] <- 0
+
+# --- 4. Create the Cartogram ---
+# Note: Cartogram generation can be computationally intensive for very detailed maps
+# or very large datasets.
+
+cat("Generating cartogram... This might take a moment.\n")
+
+# Option 1: Continuous Area Cartogram (distorts shapes)
+# This will distort the actual shapes of the countries.
+cartogram_result <- cartogram_cont(
+  world_map_with_data,
+  weight = "value", # The column containing your integer values
+  itermax = 10      # Increased iterations for potentially more visible distortion
+)
+
+# Option 2: Dorling Cartogram (uses circles, often more visually striking for size scaling)
+# This will represent each country as a circle scaled by its 'value'.
+# cartogram_result <- cartogram_dorling(
+#   world_map_with_data,
+#   weight = "value", # The column containing your integer values
+#   k = 1,            # Scaling factor for circle size (adjust as needed)
+#   itermax = 100     # More iterations for better packing of circles
+# )
+
+cat("Cartogram generation complete.\n")
+
+# --- 5. Plot the Cartogram ---
+# You can plot the 'sf' object directly.
+# Let's color the countries based on the 'value' for better visualization.
+
+# Determine the number of colors in the palette
+num_colors <- 10
+color_palette <- hcl.colors(num_colors, "viridis")
+
+# Calculate breaks: need one more break than colors
+# Ensure breaks span the range of your 'value' data
+min_val <- min(cartogram_result$value, na.rm = TRUE)
+max_val <- max(cartogram_result$value, na.rm = TRUE)
+plot_breaks <- seq(min_val, max_val, length.out = num_colors + 1)
+
+
+# Plotting with base plot function for sf objects
+plot(
+  cartogram_result["value"], # Plot the 'value' column
+  main = "World Map Scaled by Sample Value (Continuous Cartogram)", # Updated title
+  key.pos = 4, # Position of the legend (1=bottom, 2=left, 3=top, 4=right)
+  pal = color_palette, # Color palette
+  breaks = plot_breaks, # Explicitly define breaks
+  border = "grey", # Border color for countries
+  lwd = 0.5 # Line width for borders
+)
+
+# Add original map for comparison (optional)
+# plot(st_geometry(world_map_projected), border = "blue", add = TRUE) # This would overlay
+
+# If you prefer ggplot2 for more customization:
+# library(ggplot2)
+# ggplot(data = cartogram_result) +
+#   geom_sf(aes(fill = value), color = "grey", size = 0.2) +
+#   scale_fill_viridis_c(option = "plasma", name = "Your Value") +
+#   labs(title = "World Map Scaled by Sample Value (Cartogram)") +
+#   theme_minimal() +
+#   theme(
+#     plot.title = element_text(hjust = 0.5, face = "bold"),
+#     legend.position = "right"
+#   )
+
+# You can also plot the original map to compare
+# plot(world_map_projected["value"], main = "Original World Map with Sample Value")
+
+```
+
+
+
+```{r}
+# Install necessary packages if you haven't already
+# install.packages("rworldmap")
+# install.packages("cartogram")
+# install.packages("sf") # sf is often a dependency for spatial data
+
+# Load the required libraries
+library(rworldmap)
+library(cartogram)
+library(sf)
+library(ggplot2) # For better plotting if desired, though cartogram has its own plot method
+
+# --- 1. Get World Map Data ---
+# Get the base world map data. rworldmap provides a convenient way to do this.
+# We'll convert it to an 'sf' object, which is preferred by the 'cartogram' package.
+world_map_sf <- st_as_sf(getMap(resolution = "low"))
+
+# --- IMPORTANT FIX: Project the map data ---
+# The cartogram functions work best with projected data, especially for area calculations.
+# We'll transform the map to an equal-area projection (e.g., World Equal Area Cylindrical - EPSG:8857).
+# This ensures that area distortions are calculated correctly.
+cat("Transforming map projection...\n")
+world_map_projected <- st_transform(world_map_sf, crs = 8857) # EPSG:8857 for World Equal Area Cylindrical
+cat("Map projection transformed.\n")
+
+# --- 2. Create Sample Data ---
+# Create a data frame with country names and integer values.
+# I've chosen a mix of countries with very high, medium, and very low values
+# to make the distortion more apparent. Countries not listed here will effectively
+# have a value of 0 and will be filtered out.
+# Replace this with your actual table data.
+# Ensure your country identifiers match those in the 'world_map_sf' object.
+# 'SOVEREIGNT' is used here for merging.
+
+sample_data <- data.frame(
+  country = c("United States", "China", "India", "Germany", "Brazil", "Canada",
+              "Australia", "France", "Japan", "United Kingdom", "Russia", "Nigeria",
+              "Egypt", "South Africa", "Argentina", "Mexico", "Indonesia", "Italy",
+              "Spain", "Greenland", "Somalia", "Finland", "New Zealand",
+              "Myanmar", "Thailand", "Vietnam", "Saudi Arabia", "Iran", "Turkey",
+              "Poland", "Ukraine", "Kazakhstan", "Algeria", "Democratic Republic of the Congo",
+              "Belgium", "Netherlands", "Switzerland", "Luxembourg", "Singapore", "Iceland"
+              ),
+  value = c(500, 600, 450, 150, 200, 100, # Very High/High values for large countries
+            120, 180, 220, 140, 350, 80,  # Medium values
+            60, 70, 100, 170, 280, 130,
+            110, 10, 20, 30, 40,       # Low values for smaller or less populated countries
+            90, 100, 110, 160, 170, 180,
+            120, 130, 100, 50, 40,
+            55, 65, 75, 5, 80, 15 # Very low values for small countries to show shrinkage
+            )
+)
+
+
+# --- 3. Merge Sample Data with Map Data ---
+# It's crucial that the country names in your sample_data match a column in world_map_projected.
+# We'll use 'SOVEREIGNT' from world_map_projected and 'country' from sample_data for merging.
+# First, ensure both are character strings for proper merging.
+world_map_projected$SOVEREIGNT <- as.character(world_map_projected$SOVEREIGNT)
+sample_data$country <- as.character(sample_data$country)
+
+# Merge the data. Use a left join to keep all map polygons.
+# Countries in world_map_projected that are not in sample_data will have NA for 'value'.
+world_map_with_data <- merge(
+  world_map_projected, # Use the projected map data here
+  sample_data,
+  by.x = "SOVEREIGNT", # Column in world_map_projected
+  by.y = "country",    # Column in sample_data
+  all.x = TRUE         # Keep all rows from world_map_projected
+)
+
+# Handle NA values: For countries not in your sample_data, their 'value' will be NA.
+# Set NA values to 0 so we can filter them out.
+world_map_with_data$value[is.na(world_map_with_data$value)] <- 0
+
+# --- IMPORTANT: Filter out countries with zero value ---
+# This ensures the cartogram only processes and displays countries with actual data.
+cat("Filtering countries with zero values...\n")
+world_map_filtered <- world_map_with_data[world_map_with_data$value > 0, ]
+cat(paste0("Filtered map contains ", nrow(world_map_filtered), " countries.\n"))
+
+
+# --- 4. Create the Cartogram ---
+# Note: Cartogram generation can be computationally intensive for very detailed maps
+# or very large datasets.
+
+cat("Generating continuous cartogram... This might take a moment.\n")
+
+# Using Continuous Area Cartogram (distorts shapes)
+# Increased iterations to allow for more distortion, but there are inherent limits
+# due to shape and contiguity preservation.
+cartogram_result <- cartogram_cont(
+  world_map_filtered, # Use the filtered data here
+  weight = "value", # The column containing your integer values
+  itermax = 50      # Increased iterations for potentially more visible distortion
+)
+
+cat("Continuous cartogram generation complete.\n")
+
+# --- 5. Plot the Cartogram ---
+# You can plot the 'sf' object directly.
+# Let's color the countries based on the 'value' for better visualization.
+
+# Determine the number of colors in the palette
+num_colors <- 10
+color_palette <- hcl.colors(num_colors, "viridis")
+
+# Calculate breaks: need one more break than colors
+# Ensure breaks span the range of your 'value' data
+min_val <- min(cartogram_result$value, na.rm = TRUE)
+max_val <- max(cartogram_result$value, na.rm = TRUE)
+plot_breaks <- seq(min_val, max_val, length.out = num_colors + 1)
+
+
+# Plotting with base plot function for sf objects
+plot(
+  cartogram_result["value"], # Plot the 'value' column
+  main = "World Map Scaled by Sample Value (Continuous Cartogram)", # Updated title
+  key.pos = 4, # Position of the legend (1=bottom, 2=left, 3=top, 4=right)
+  pal = color_palette, # Color palette
+  breaks = plot_breaks, # Explicitly define breaks
+  border = "grey", # Border color for countries
+  lwd = 0.5 # Line width for borders
+)
+
+# You can also plot the original map for comparison (optional)
+# plot(st_geometry(world_map_filtered), border = "blue", add = TRUE) # This would overlay
+
+```
+
+
+```{r}
+# Load the necessary libraries
+library(ggplot2)
+library(dplyr)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(sf) # Needed for spatial operations like calculating centroids
+library(tidyr) # For replace_na
+library(ggrepel) # NEW: For non-overlapping labels
+
+# 1. Read in the transplant data using tribble()
+# This data contains the number of deceased and living transplants for various countries.
+transplant_data <- tribble(
+  ~country_origin, ~type,       ~transplants, ~rnaturalearth_name,
+  "BAHRAIN",       "Deceased", 1,             "Bahrain",
+  "BAHRAIN",       "Living",    0,             "Bahrain",
+  "BERMUDA",       "Deceased", 1,             "Bermuda",
+  "BERMUDA",       "Living",    0,             "Bermuda",
+  "BRAZIL",        "Deceased", 1,             "Brazil",
+  "BRAZIL",        "Living",    0,             "Brazil",
+  "BURUNDI",       "Deceased", 1,             "Burundi",
+  "BURUNDI",       "Living",    0,             "Burundi",
+  "CAMBODIA",      "Deceased", 1,             "Cambodia",
+  "CAMBODIA",      "Living",    0,             "Cambodia",
+  "CANADA",        "Deceased", 4,             "Canada",
+  "CANADA",        "Living",    0,             "Canada",
+  "CAYMAN ISLAND", "Deceased", 2,             "Cayman Islands",
+  "CAYMAN ISLAND", "Living",    0,             "Cayman Islands",
+  "CHILE",         "Deceased", 1,             "Chile",
+  "CHILE",         "Living",    0,             "Chile",
+  "COSTA RICA",    "Deceased", 1,             "Costa Rica",
+  "COSTA RICA",    "Living",    0,             "Costa Rica",
+  "CUBA",          "Deceased", 1,             "Cuba",
+  "CUBA",          "Living",    0,             "Cuba",
+  "DOMINICAN REPUBLIC", "Deceased", 3,         "Dominican Republic",
+  "DOMINICAN REPUBLIC", "Living",    1,         "Dominican Republic",
+  "EGYPT",         "Deceased", 2,             "Egypt",
+  "EGYPT",         "Living",    0,             "Egypt",
+  "EL SALVADOR",   "Deceased", 4,             "El Salvador",
+  "EL SALVADOR",   "Living",    0,             "El Salvador",
+  "GREECE",        "Deceased", 2,             "Greece",
+  "GREECE",        "Living",    0,             "Greece",
+  "GUATEMALA",     "Deceased", 1,             "Guatemala",
+  "GUATEMALA",     "Living",    0,             "Guatemala",
+  "ISRAEL",        "Deceased", 38,            "Israel",
+  "ISRAEL",        "Living",    0,             "Israel",
+  "JAPAN",         "Deceased", 1,             "Japan",
+  "JAPAN",         "Living",    0,             "Japan",
+  "JORDAN",        "Deceased", 2,             "Jordan",
+  "JORDAN",        "Living",    13,            "Jordan",
+  "KUWAIT",        "Deceased", 31,            "Kuwait",
+  "KUWAIT",        "Living",    14,            "Kuwait",
+  "LEBANON",       "Deceased", 1,             "Lebanon",
+  "LEBANON",       "Living",    0,             "Lebanon",
+  "MEXICO",        "Deceased", 1,             "Mexico",
+  "MEXICO",        "Living",    0,             "Mexico",
+  "NICARAGUA",     "Deceased", 1,             "Nicaragua",
+  "NICARAGUA",     "Living",    0,             "Nicaragua",
+  "PARAGUAY",      "Deceased", 1,             "Paraguay",
+  "PARAGUAY",      "Living",    0,             "Paraguay",
+  "PHILIPPINES",   "Deceased", 4,             "Philippines",
+  "PHILIPPINES",   "Living",    1,             "Philippines",
+  "QATAR",         "Deceased", 1,             "Qatar",
+  "QATAR",         "Living",    1,             "Qatar",
+  "RUSSIA",        "Deceased", 17,            "Russia",
+  "RUSSIA",        "Living",    4,             "Russia",
+  "SAUDI ARABIA",  "Deceased", 62,            "Saudi Arabia",
+  "SAUDI ARABIA",  "Living",    7,             "Saudi Arabia",
+  "SINGAPORE",     "Deceased", 1,             "Singapore",
+  "SINGAPORE",     "Living",    0,             "Singapore",
+  "SOUTH AFRICA",  "Deceased", 1,             "South Africa",
+  "SOUTH AFRICA",  "Living",    0,             "South Africa",
+  "TURKEY",        "Deceased", 12,            "Turkey",
+  "TURKEY",        "Living",    6,             "Turkey",
+  "UNITED ARAB EMIRATES", "Deceased", 6,       "United Arab Emirates",
+  "UNITED ARAB EMIRATES", "Living",    1,       "United Arab Emirates",
+  "UNITED KINGDOM", "Deceased", 3,            "United Kingdom",
+  "UNITED KINGDOM", "Living",    0,            "United Kingdom",
+  "VENEZUELA",     "Deceased", 4,             "Venezuela",
+  "VENEZUELA",     "Living",    1,             "Venezuela",
+  "VIET NAM",      "Deceased", 3,             "Viet Nam",
+  "VIET NAM",      "Living",    0,             "Viet Nam",
+  "YEMEN:REPUBLIC OF", "Deceased", 1,         "Yemen",
+  "YEMEN:REPUBLIC OF", "Living",    0,         "Yemen"
+)
+
+# 2. Get the world map data
+# We use 'ne_countries' from 'rnaturalearth' to get geographic data for countries.
+world_map <- ne_countries(scale = "medium", returnclass = "sf")
+
+# --- Calculate centroids for all countries in the base map ---
+# To place numbers at the center of each country, we need their geographic centroids.
+# st_centroid() calculates the centroid of each country's polygon.
+# st_coordinates() extracts the longitude (X) and latitude (Y) from these centroids.
+country_centroids <- world_map %>%
+  st_centroid() %>%
+  st_coordinates() %>%
+  as_tibble() %>% # Convert to a tibble (data frame)
+  rename(lon = X, lat = Y) %>% # Rename columns for clarity
+  bind_cols(name_long = world_map$name_long) # Add country names to link back to map data
+
+# 3. Create a template for all countries and both types
+# This ensures that every country is considered for both "Deceased" and "Living" transplant types,
+# even if they don't have data for one or both.
+map_data_template <- world_map %>%
+  select(name_long, geometry) %>% # Select only the country name and its geographic shape
+  full_join(
+    expand.grid(name_long = unique(world_map$name_long), # Create all combinations of countries and types
+                type = c("Deceased", "Living")),
+    by = "name_long"
+  )
+
+# 4. Merge the template with the transplant data AND the centroids
+# We join the transplant data to the map template, and then add the calculated centroids.
+world_map_with_data <- map_data_template %>%
+  left_join(transplant_data %>% select(rnaturalearth_name, type, transplants),
+            by = c("name_long" = "rnaturalearth_name", "type")) %>%
+  # Fill any NA values in 'transplants' with 0 (for countries/types with no data)
+  mutate(transplants = tidyr::replace_na(transplants, 0)) %>%
+  # Finally, join the centroids to this combined data frame
+  left_join(country_centroids, by = "name_long")
+
+# --- Filter for non-zero transplant values for labeling ---
+# We create a separate data frame specifically for the labels.
+# This ensures that numbers are only plotted on countries that actually have transplants (> 0).
+data_for_labels <- world_map_with_data %>%
+  filter(transplants > 0)
+
+# 5. Create the two faceted maps with non-overlapping numbers
+# We use ggplot2 to create the map.
+ggplot(data = world_map_with_data) +
+  # Plot all countries as a base layer with a light grey fill and white borders.
+  geom_sf(data=world_map_with_data, aes(fill = as.integer(transplants>0)), color = "black", size = 0.2) +
+  # Add the transplant numbers using geom_text_repel for non-overlapping labels.
+  # 'data = data_for_labels' ensures only non-zero values are labeled.
+  # 'x = lon' and 'y = lat' are the original centroid positions.
+  # 'label = transplants' displays the actual number.
+  scale_fill_continuous(type='gradient',low = "white", high = "black") + 
+  geom_text_repel(data = data_for_labels,
+                  aes(x = lon, y = lat, label = transplants,size=log(transplants)),
+                  color = "red", # Color of the numbers
+                  #size = transplants,        # Size of the numbers
+                  fontface = "bold", # Make numbers bold for better visibility
+                  box.padding = 0.5, # Padding around the label box
+                  point.padding = 0.5, # Padding around the point
+                  min.segment.length = 0, # Always draw a segment if label is moved
+                  max.overlaps = Inf, # Try to resolve all overlaps
+                  force = 1, # Strength of repulsion
+                  seed = 123 # For reproducible label placement
+                  ) +
+  # Use facet_wrap to create separate maps for "Deceased" and "Living" transplants.
+  facet_wrap(~ type, ncol = 1) +
+
+  # Polish the maps for a clean and informative look.
+  labs(
+    title = "Transplant Counts by Country",
+    subtitle = "Numbers represent the total transplants for each type (Deceased or Living)"
+  ) +
+  theme_void() + # A minimalist theme without axes or grid lines
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16), # Center and bold title
+    plot.subtitle = element_text(hjust = 0.5), # Center subtitle
+    legend.position = "none", # No legend is needed as the numbers are displayed directly
+    strip.text = element_text(face = "bold", size = 12) # Bold facet titles
+  )
+
+
+```
+
