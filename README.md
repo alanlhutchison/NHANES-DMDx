@@ -1,12 +1,8 @@
 # NHANES-DMDx
-Diabetes Diagnosis project using A1c and OGTT data from NHANES 2005-2016
+Diabetes Diagnosis project using A1c, FPG, and OGTT data from NHANES 2005-2016 with validation from DPPOS
 
 This repository is to accompany the manuscript "Development and validation of a multivariable Prediction Model for Pre-diabetes and Diabetes using Easily Obtainable Clinical Data"
 
 The workflow for generating figures and analysis for the manuscript is as follows:
 
-The order of running should be:
-DPPOS-DF_2026.02.09.Rmd
-DPPOS-Validation_2026.03.05.Rmd
-DMDx-MortPred_2026.02.11.Rmd
-DMDx-Mort_2026.02.11.Rmd
+To run everything, you can run file 00.run_all.R, or you can run 01 02 03 04 in order as Rmds in RStudio.
