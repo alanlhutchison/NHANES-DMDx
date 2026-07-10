@@ -101,6 +101,14 @@ mortality_clean <- mort.table
 
 ```
 
+```{r Comparisons}
+
+#load("df.master-2025.02.09.Rda")
+#readRDS("df_comp.Rds")
+#df_table
+#df_dppos_aligned
+
+```
 
 
 
@@ -108,15 +116,16 @@ mortality_clean <- mort.table
 ```{r Load Data}
 
 ### This is the 2005-2016 data
-df_full <-readRDS(file="~/Documents/Data/NHANES/df_nhanes_2026.01.19.Rda")
+df_full <-readRDS(file="~/Documents/Data/NHANES/df_nhanes_2026.01.19.rds")
 table(df_full$Year)
 
+df_full
 
 ### this is the 1999-2004 data
-df_99.04 <- readRDS(file = "~/Documents/NHANES-DMDx/df_99.04.rds")
+df_99.04 <- readRDS(file = "df_99.04.rds")
 
 
-xgb_a1cfpg_model <- readRDS(file="~/Documents/NHANES-DMDx/xgb_model2_2026.02.11.rds")
+xgb_a1cfpg_model <- readRDS(file="~/Documents/NHANES-DMDx/xgb_model2_2026.03.05.rds")#.02.11.rds")
 
 dim(df_99.04)
 dim(df_full)
@@ -356,6 +365,19 @@ table.full %>%
 ```
 
 
+
+```{r}
+table.full %>% mutate(BMI=Weight*100*100/Height/Height) %>% mutate(A=1)  %>% filter(Type=="2005-2014<br />Training Cohort<br />(n=11,718)" |Type== "2015-2016<br />Testing Cohort<br />(n=2,082)") %>% 
+  getDescriptionStatsBy(by=A,c(table.cols,"BMI"), add_total_col = FALSE) %>% 
+  htmlTable(# Applies to the table body
+    css.cell = "font-family: Arial !important; font-size: 9pt !important;",
+    css.header = "font-family: Arial !important; font-size: 9pt !important; font-weight: bold;"
+  )
+
+                                           
+```
+
+
 ```{r}
 
 
@@ -541,7 +563,8 @@ df.mo3 <- df.mort3 #rbind(office_pre_final %>% select(-c(ucod_lead)),
 
 ### COMBINE COMBINE
 df.mo3 %>% mutate(NAN = !is.na(pred)) %>% select(NAN,Year) %>% table()
-save(df.mo3,file="files/NHANES-df.mo3_noogtt.Rda")
+write_rds(df.mo3,file="NHANES-df.mo3_noogtt.rds")
+
 
 ```
 
