@@ -22,4 +22,9 @@ The order of running should be:
 
 This is all done by 
 00.run_all.R
+<<<<<<< HEAD
 >>>>>>> b9b82ba (Added .Rds to .gitignore, Updated filenames referenced in README)
+=======
+
+Updated 2026.07.15
+>>>>>>> 3534f9b (Added .Rds to .gitignore, Updated filenames referenced in README)

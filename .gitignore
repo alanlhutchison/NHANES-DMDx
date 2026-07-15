@@ -17,6 +17,7 @@
 .rda
 .Rda
 .Rds
+.RDS
 
 # Example code in package build process
 *-Ex.R
