@@ -2,7 +2,6 @@
 Diabetes Diagnosis project using A1c, FPG, and OGTT data from NHANES 2005-2016 with validation from DPPOS
 =======
 Diabetes Diagnosis project using A1c and OGTT data from NHANES 2005-2016 and DPPOS
->>>>>>> b9b82ba (Added .Rds to .gitignore, Updated filenames referenced in README)
 
 This repository is to accompany the manuscript "Development and validation of a multivariable Prediction Model for Pre-diabetes and Diabetes using Easily Obtainable Clinical Data"
 
@@ -10,7 +9,6 @@ The NHANES code is available online from the CDC. The DPPOS data is available th
 
 The workflow for generating figures and analysis for the manuscript is as follows:
 
-<<<<<<< HEAD
 To run everything, you can run file 00.run_all.R, or you can run 01 02 03 04 in order as Rmds in RStudio.
 =======
 The order of running should be:
@@ -21,9 +19,3 @@ The order of running should be:
 
 This is all done by 
 00.run_all.R
-<<<<<<< HEAD
->>>>>>> b9b82ba (Added .Rds to .gitignore, Updated filenames referenced in README)
-=======
-
-Updated 2026.07.15
->>>>>>> 3534f9b (Added .Rds to .gitignore, Updated filenames referenced in README)
