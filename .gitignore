@@ -8,16 +8,16 @@
 
 # User-specific files
 .Ruserdata
-.csv
-.xlsx
-.txt
-.zip
-.sas7bdat
-.rds
-.rda
-.Rda
-.Rds
-.RDS
+*.csv
+*.xlsx
+*.txt
+*.zip
+*.sas7bdat
+*.rds
+*.rda
+*.Rda
+*.Rds
+*.RDS
 
 # Example code in package build process
 *-Ex.R
