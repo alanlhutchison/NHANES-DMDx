@@ -20,6 +20,14 @@
 *.RDS
 *.dat
 
+# Image files
+*.bmp
+*.pdf
+*.jpg
+*.gif
+*.tiff
+*.png
+
 # Example code in package build process
 *-Ex.R
 
