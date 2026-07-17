@@ -1,5 +1,4 @@
 # NHANES-DMDx
-<<<<<<< HEAD
 Diabetes Diagnosis project using A1c, FPG, and OGTT data from NHANES 2005-2016 with validation from DPPOS
 =======
 Diabetes Diagnosis project using A1c and OGTT data from NHANES 2005-2016 and DPPOS
